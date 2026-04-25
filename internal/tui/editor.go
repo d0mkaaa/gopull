@@ -1,0 +1,698 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/d0mkaaa/gopull/internal/curlparse"
+	"github.com/d0mkaaa/gopull/internal/store"
+)
+
+type editorTab int
+
+const (
+	etBody editorTab = iota
+	etHeaders
+	etAuth
+	etTests
+	etOpts
+)
+
+var editorTabNames = []string{"body", "headers", "auth", "tests", "opts"}
+
+type authKind int
+
+const (
+	akNone authKind = iota
+	akBearer
+	akBasic
+)
+
+var authKindNames = []string{"none", "bearer", "basic"}
+
+type editorInner int
+
+const (
+	eiMethod editorInner = iota
+	eiURL
+	eiContent
+)
+
+type EditorModel struct {
+	method       textinput.Model
+	url          textinput.Model
+	bodyInput    textarea.Model
+	headersInput textarea.Model
+	testsInput   textarea.Model
+	tokenInput   textinput.Model
+	userInput    textinput.Model
+	passInput    textinput.Model
+
+	tab      editorTab
+	bodyMode string // "raw" or "form"
+	authKind authKind
+	authField int // 0=first, 1=second; -1=type selector
+	inner    editorInner
+	focused  bool
+
+	optsField        int // 0=skipVerify, 1=disableRedirects, 2=proxyURL, 3=timeout
+	skipVerify       bool
+	disableRedirects bool
+	proxyInput       textinput.Model
+	perReqTimeout    textinput.Model
+
+	requestID    string
+	collectionID string
+	requestName  string
+
+	width  int
+	height int
+}
+
+func newEditor(w, h int) EditorModel {
+	m := textinput.New()
+	m.Placeholder = "GET"
+	m.SetValue("GET")
+	m.Width = 8
+	m.CharLimit = 10
+
+	u := textinput.New()
+	u.Placeholder = "https://httpbin.org/get  (or paste a curl command and press tab)"
+	u.CharLimit = 1000
+
+	b := textarea.New()
+	b.Placeholder = "Request body..."
+	b.ShowLineNumbers = false
+
+	h2 := textarea.New()
+	h2.Placeholder = "Content-Type: application/json\nAuthorization: Bearer token\n# X-Disabled-Header: value"
+	h2.ShowLineNumbers = false
+
+	t := textarea.New()
+	t.Placeholder = "assert status == 200\nassert body contains \"id\"\nset TOKEN = $.data.access_token"
+	t.ShowLineNumbers = false
+
+	tok := textinput.New()
+	tok.Placeholder = "token"
+	tok.EchoMode = textinput.EchoPassword
+	tok.EchoCharacter = '•'
+
+	usr := textinput.New()
+	usr.Placeholder = "username"
+
+	pass := textinput.New()
+	pass.Placeholder = "password"
+	pass.EchoMode = textinput.EchoPassword
+	pass.EchoCharacter = '•'
+
+	proxy := textinput.New()
+	proxy.Placeholder = "http://proxy:8080"
+	proxy.CharLimit = 256
+
+	tout := textinput.New()
+	tout.Placeholder = "0"
+	tout.CharLimit = 6
+
+	ed := EditorModel{
+		method:        m,
+		url:           u,
+		bodyInput:     b,
+		headersInput:  h2,
+		testsInput:    t,
+		tokenInput:    tok,
+		userInput:     usr,
+		passInput:     pass,
+		proxyInput:    proxy,
+		perReqTimeout: tout,
+		bodyMode:      "raw",
+		authField:     -1,
+		width:         w,
+		height:        h,
+	}
+	return ed.setSize(w, h)
+}
+
+func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
+	if !m.focused {
+		return m, nil
+	}
+
+	if km, ok := msg.(tea.KeyMsg); ok {
+		switch {
+		case key.Matches(km, keys.Next):
+			return m.tabForward()
+		case key.Matches(km, keys.Prev):
+			return m.tabBackward()
+		case key.Matches(km, keys.TabLeft):
+			m = m.prevTab()
+			return m, nil
+		case key.Matches(km, keys.TabRight):
+			m = m.nextTab()
+			return m, nil
+		case key.Matches(km, keys.BodyMode) && m.inner == eiContent && m.tab == etBody:
+			switch m.bodyMode {
+			case "raw":
+				m.bodyMode = "form"
+				m.bodyInput.Placeholder = "Key: Value\nKey2: Value2"
+			case "form":
+				m.bodyMode = "graphql"
+				if strings.TrimSpace(m.bodyInput.Value()) == "" {
+					m.bodyInput.SetValue("{\n  \"query\": \"\",\n  \"variables\": {}\n}")
+				}
+				m.bodyInput.Placeholder = "{\"query\": \"\", \"variables\": {}}"
+			default:
+				m.bodyMode = "raw"
+				m.bodyInput.Placeholder = "Request body..."
+			}
+			return m, nil
+
+		case key.Matches(km, keys.PrettyPrint) && m.inner == eiContent && m.tab == etBody:
+			v := m.bodyInput.Value()
+			if formatted := prettyJSON([]byte(v)); formatted != v {
+				m.bodyInput.SetValue(formatted)
+			}
+			return m, nil
+		}
+
+		if m.inner == eiMethod && (km.Type == tea.KeyUp || km.Type == tea.KeyDown) {
+			m.cycleMethod(km.Type == tea.KeyDown)
+			return m, nil
+		}
+
+		if m.inner == eiContent && m.tab == etAuth && m.authField < 0 {
+			switch km.Type {
+			case tea.KeyLeft:
+				m.authKind = authKind((int(m.authKind) + len(authKindNames) - 1) % len(authKindNames))
+				return m, nil
+			case tea.KeyRight:
+				m.authKind = authKind((int(m.authKind) + 1) % len(authKindNames))
+				return m, nil
+			case tea.KeyEnter:
+				if m.authKind != akNone {
+					m.authField = 0
+					m = m.focusAuthField()
+				}
+				return m, nil
+			}
+		}
+
+		if m.inner == eiContent && m.tab == etOpts {
+			switch km.Type {
+			case tea.KeyUp:
+				if m.optsField > 0 {
+					m.optsField--
+					m = m.focusOptsField()
+				}
+				return m, nil
+			case tea.KeyDown:
+				if m.optsField < 3 {
+					m.optsField++
+					m = m.focusOptsField()
+				}
+				return m, nil
+			case tea.KeyLeft, tea.KeyRight:
+				switch m.optsField {
+				case 0:
+					m.skipVerify = !m.skipVerify
+				case 1:
+					m.disableRedirects = !m.disableRedirects
+				}
+				return m, nil
+			}
+		}
+
+		// detect curl paste: on Tab (leaving URL field) or Enter (confirm in URL field)
+		if m.inner == eiURL && (km.Type == tea.KeyTab || km.Type == tea.KeyEnter) {
+			if val := strings.TrimSpace(m.url.Value()); curlparse.LooksLikeCurl(val) {
+				if parsed, err := curlparse.Parse(val); err == nil {
+					return m.Load(&parsed, m.collectionID), nil
+				}
+			}
+		}
+	}
+
+	var cmd tea.Cmd
+	switch m.inner {
+	case eiMethod:
+		m.method, cmd = m.method.Update(msg)
+	case eiURL:
+		m.url, cmd = m.url.Update(msg)
+	case eiContent:
+		switch m.tab {
+		case etBody:
+			m.bodyInput, cmd = m.bodyInput.Update(msg)
+		case etHeaders:
+			m.headersInput, cmd = m.headersInput.Update(msg)
+		case etTests:
+			m.testsInput, cmd = m.testsInput.Update(msg)
+		case etAuth:
+			if m.authField >= 0 {
+				cmd = m.updateAuthInput(msg)
+			}
+		case etOpts:
+			switch m.optsField {
+			case 2:
+				m.proxyInput, cmd = m.proxyInput.Update(msg)
+			case 3:
+				m.perReqTimeout, cmd = m.perReqTimeout.Update(msg)
+			}
+		}
+	}
+	return m, cmd
+}
+
+func (m EditorModel) tabForward() (EditorModel, tea.Cmd) {
+	switch m.inner {
+	case eiMethod:
+		m.inner = eiURL
+		m.method.Blur()
+		m.url.Focus()
+	case eiURL:
+		m.inner = eiContent
+		m.url.Blur()
+		m = m.focusContent()
+	case eiContent:
+		if m.tab == etAuth && m.authField >= 0 {
+			max := 0
+			if m.authKind == akBasic {
+				max = 1
+			}
+			if m.authField < max {
+				m.authField++
+				m = m.focusAuthField()
+				return m, nil
+			}
+		}
+		m = m.blurContent()
+		return m, func() tea.Msg { return focusResponseMsg{} }
+	}
+	return m, nil
+}
+
+func (m EditorModel) tabBackward() (EditorModel, tea.Cmd) {
+	switch m.inner {
+	case eiURL:
+		m.inner = eiMethod
+		m.url.Blur()
+		m.method.Focus()
+	case eiContent:
+		if m.tab == etAuth && m.authField > 0 {
+			m.authField--
+			m = m.focusAuthField()
+			return m, nil
+		}
+		m.inner = eiURL
+		m = m.blurContent()
+		m.url.Focus()
+	case eiMethod:
+		m = m.blurContent()
+		return m, func() tea.Msg { return focusSidebarMsg{} }
+	}
+	return m, nil
+}
+
+func (m EditorModel) prevTab() EditorModel {
+	if m.tab > 0 {
+		m.tab--
+	}
+	m.authField = -1
+	if m.inner == eiContent {
+		return m.focusContent()
+	}
+	return m
+}
+
+func (m EditorModel) nextTab() EditorModel {
+	if int(m.tab) < len(editorTabNames)-1 {
+		m.tab++
+	}
+	m.authField = -1
+	if m.inner == eiContent {
+		return m.focusContent()
+	}
+	return m
+}
+
+func (m EditorModel) focusContent() EditorModel {
+	m.bodyInput.Blur()
+	m.headersInput.Blur()
+	m.testsInput.Blur()
+	m.tokenInput.Blur()
+	m.userInput.Blur()
+	m.passInput.Blur()
+	m.proxyInput.Blur()
+	m.perReqTimeout.Blur()
+	switch m.tab {
+	case etBody:
+		m.bodyInput.Focus()
+	case etHeaders:
+		m.headersInput.Focus()
+	case etTests:
+		m.testsInput.Focus()
+	case etAuth:
+		if m.authField >= 0 {
+			m = m.focusAuthField()
+		}
+	case etOpts:
+		m = m.focusOptsField()
+	}
+	return m
+}
+
+func (m EditorModel) blurContent() EditorModel {
+	m.bodyInput.Blur()
+	m.headersInput.Blur()
+	m.testsInput.Blur()
+	m.tokenInput.Blur()
+	m.userInput.Blur()
+	m.passInput.Blur()
+	m.proxyInput.Blur()
+	m.perReqTimeout.Blur()
+	return m
+}
+
+func (m EditorModel) focusOptsField() EditorModel {
+	m.proxyInput.Blur()
+	m.perReqTimeout.Blur()
+	switch m.optsField {
+	case 2:
+		m.proxyInput.Focus()
+	case 3:
+		m.perReqTimeout.Focus()
+	}
+	return m
+}
+
+func (m EditorModel) focusAuthField() EditorModel {
+	m.tokenInput.Blur()
+	m.userInput.Blur()
+	m.passInput.Blur()
+	switch m.authKind {
+	case akBearer:
+		m.tokenInput.Focus()
+	case akBasic:
+		if m.authField == 0 {
+			m.userInput.Focus()
+		} else {
+			m.passInput.Focus()
+		}
+	}
+	return m
+}
+
+func (m *EditorModel) updateAuthInput(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	switch m.authKind {
+	case akBearer:
+		m.tokenInput, cmd = m.tokenInput.Update(msg)
+	case akBasic:
+		if m.authField == 0 {
+			m.userInput, cmd = m.userInput.Update(msg)
+		} else {
+			m.passInput, cmd = m.passInput.Update(msg)
+		}
+	}
+	return cmd
+}
+
+func (m *EditorModel) cycleMethod(forward bool) {
+	current := strings.ToUpper(strings.TrimSpace(m.method.Value()))
+	idx := 0
+	for i, v := range methods {
+		if v == current {
+			idx = i
+			break
+		}
+	}
+	if forward {
+		idx = (idx + 1) % len(methods)
+	} else {
+		idx = (idx + len(methods) - 1) % len(methods)
+	}
+	m.method.SetValue(methods[idx])
+}
+
+func (m EditorModel) View() string {
+	mv := m.method.Value()
+	if mv == "" {
+		mv = "GET"
+	}
+
+	methodHint := ""
+	if m.inner == eiMethod && m.focused {
+		methodHint = hint.Render("  ↑↓")
+	}
+	topRow := lipgloss.JoinHorizontal(lipgloss.Center,
+		methodBadge(mv), methodHint, "  ", m.url.View(),
+	)
+
+	focusedContent := m.inner == eiContent && m.focused
+	tabs := renderTabs(editorTabNames, int(m.tab), focusedContent)
+
+	var content string
+	switch m.tab {
+	case etBody:
+		var modeLabel string
+		switch m.bodyMode {
+		case "form":
+			modeLabel = formMode.Render("form")
+		case "graphql":
+			modeLabel = formMode.Render("graphql")
+		default:
+			modeLabel = hint.Render("raw")
+		}
+		content = lipgloss.JoinVertical(lipgloss.Left,
+			modeLabel+hint.Render("  alt+m toggle"),
+			m.bodyInput.View(),
+		)
+	case etHeaders:
+		content = m.headersInput.View()
+	case etTests:
+		content = m.testsInput.View()
+	case etAuth:
+		content = m.viewAuth()
+	case etOpts:
+		content = m.viewOpts()
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, topRow, "", tabs, content)
+}
+
+func (m EditorModel) viewAuth() string {
+	var typeParts []string
+	for i, name := range authKindNames {
+		if authKind(i) == m.authKind {
+			typeParts = append(typeParts, tabActive.Render(name))
+		} else {
+			typeParts = append(typeParts, tabInactive.Render(name))
+		}
+	}
+	if m.authField < 0 && m.focused {
+		typeParts = append([]string{hint.Render("←→ ")}, typeParts...)
+	}
+	typeRow := strings.Join(typeParts, "  ")
+
+	var fields string
+	switch m.authKind {
+	case akNone:
+		fields = hint.Render("no auth")
+	case akBearer:
+		fields = lipgloss.JoinVertical(lipgloss.Left,
+			hint.Render("token"), m.tokenInput.View(),
+		)
+	case akBasic:
+		fields = lipgloss.JoinVertical(lipgloss.Left,
+			hint.Render("username"), m.userInput.View(),
+			hint.Render("password"), m.passInput.View(),
+		)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, typeRow, "", fields)
+}
+
+func (m EditorModel) viewOpts() string {
+	boolStr := func(v bool) string {
+		if v {
+			return tabActive.Render("yes")
+		}
+		return hint.Render("no")
+	}
+	focused := m.inner == eiContent && m.focused
+
+	line := func(label string, val string, active bool) string {
+		sel := "  "
+		if active && focused {
+			sel = hint.Render("→ ")
+		}
+		return sel + hint.Render(fmt.Sprintf("%-20s", label)) + val
+	}
+
+	skipVal := boolStr(m.skipVerify) + hint.Render("  ← →")
+	redirVal := boolStr(m.disableRedirects) + hint.Render("  ← →")
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		line("skip TLS verify", skipVal, m.optsField == 0),
+		line("disable redirects", redirVal, m.optsField == 1),
+		line("proxy URL", m.proxyInput.View(), m.optsField == 2),
+		line("timeout override", m.perReqTimeout.View()+hint.Render(" sec  (0 = global)"), m.optsField == 3),
+	)
+}
+
+func (m EditorModel) Focus() EditorModel {
+	m.focused = true
+	m.inner = eiMethod
+	m.method.Focus()
+	return m
+}
+
+func (m EditorModel) Blur() EditorModel {
+	m.focused = false
+	m.method.Blur()
+	m.url.Blur()
+	return m.blurContent()
+}
+
+func (m EditorModel) setSize(w, h int) EditorModel {
+	m.width = w
+	m.height = h
+	inner := w - 4
+	m.url.Width = max(10, inner-16)
+	contentH := max(3, h-6)
+	m.bodyInput.SetWidth(inner)
+	m.bodyInput.SetHeight(contentH)
+	m.headersInput.SetWidth(inner)
+	m.headersInput.SetHeight(contentH)
+	m.testsInput.SetWidth(inner)
+	m.testsInput.SetHeight(contentH)
+	tokW := max(20, inner-2)
+	m.tokenInput.Width = tokW
+	m.userInput.Width = tokW
+	m.passInput.Width = tokW
+	m.proxyInput.Width = max(20, inner-16)
+	m.perReqTimeout.Width = 8
+	return m
+}
+
+func (m EditorModel) Load(r *store.Request, collID string) EditorModel {
+	m.method.SetValue(r.Method)
+	m.url.SetValue(r.URL)
+	m.bodyInput.SetValue(r.Body.Raw)
+	m.bodyMode = r.Body.Mode
+	if m.bodyMode == "" {
+		m.bodyMode = "raw"
+	}
+	m.testsInput.SetValue(r.Tests)
+	m.requestID = r.ID
+	m.collectionID = collID
+	m.requestName = r.Name
+
+	var sb strings.Builder
+	for _, h := range r.Headers {
+		if h.Enabled {
+			sb.WriteString(h.Key + ": " + h.Value + "\n")
+		} else {
+			sb.WriteString("# " + h.Key + ": " + h.Value + "\n")
+		}
+	}
+	m.headersInput.SetValue(strings.TrimRight(sb.String(), "\n"))
+
+	switch r.Auth.Type {
+	case "bearer":
+		m.authKind = akBearer
+		m.tokenInput.SetValue(r.Auth.Token)
+	case "basic":
+		m.authKind = akBasic
+		m.userInput.SetValue(r.Auth.User)
+		m.passInput.SetValue(r.Auth.Pass)
+	default:
+		m.authKind = akNone
+	}
+	m.authField = -1
+
+	m.skipVerify = r.Options.SkipTLSVerify
+	m.disableRedirects = r.Options.DisableRedirects
+	m.proxyInput.SetValue(r.Options.ProxyURL)
+	if r.Options.TimeoutSecs > 0 {
+		m.perReqTimeout.SetValue(fmt.Sprintf("%d", r.Options.TimeoutSecs))
+	} else {
+		m.perReqTimeout.SetValue("")
+	}
+	return m
+}
+
+func (m EditorModel) BuildRequest() store.Request {
+	r := store.Request{
+		ID:    m.requestID,
+		Name:  m.requestName,
+		Tests: m.testsInput.Value(),
+		Body:  store.Body{Mode: m.bodyMode, Raw: m.bodyInput.Value()},
+	}
+	r.Method = strings.ToUpper(strings.TrimSpace(m.method.Value()))
+	r.URL = strings.TrimSpace(m.url.Value())
+	if r.Method == "" {
+		r.Method = "GET"
+	}
+
+	for _, line := range strings.Split(m.headersInput.Value(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		enabled := true
+		if strings.HasPrefix(line, "#") {
+			enabled = false
+			line = strings.TrimSpace(strings.TrimPrefix(line, "#"))
+		}
+		if line == "" {
+			continue
+		}
+		idx := strings.Index(line, ":")
+		if idx < 0 {
+			continue
+		}
+		r.Headers = append(r.Headers, store.Header{
+			Key:     strings.TrimSpace(line[:idx]),
+			Value:   strings.TrimSpace(line[idx+1:]),
+			Enabled: enabled,
+		})
+	}
+
+	switch m.authKind {
+	case akBearer:
+		r.Auth = store.Auth{Type: "bearer", Token: m.tokenInput.Value()}
+	case akBasic:
+		r.Auth = store.Auth{Type: "basic", User: m.userInput.Value(), Pass: m.passInput.Value()}
+	default:
+		r.Auth = store.Auth{Type: "none"}
+	}
+
+	r.Options.SkipTLSVerify = m.skipVerify
+	r.Options.DisableRedirects = m.disableRedirects
+	r.Options.ProxyURL = m.proxyInput.Value()
+	if v := m.perReqTimeout.Value(); v != "" && v != "0" {
+		n := 0
+		fmt.Sscanf(v, "%d", &n)
+		r.Options.TimeoutSecs = n
+	}
+	return r
+}
+
+func (m EditorModel) TestsScript() string {
+	return m.testsInput.Value()
+}
+
+// BodyValue returns the current raw body text.
+func (m EditorModel) BodyValue() string {
+	return m.bodyInput.Value()
+}
+
+// SetBody replaces the body textarea content.
+func (m EditorModel) SetBody(s string) EditorModel {
+	m.bodyInput.SetValue(s)
+	return m
+}
