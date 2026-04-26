@@ -43,9 +43,10 @@ type Body struct {
 }
 
 type Config struct {
-	Version     int    `json:"version"`
-	TimeoutSecs int    `json:"timeout_secs"` // default 30
-	Theme       string `json:"theme"`         // dark, light
+	Version         int    `json:"version"`
+	TimeoutSecs     int    `json:"timeout_secs"`
+	Theme           string `json:"theme"`
+	MaxDisplayBytes int    `json:"max_display_bytes,omitempty"` // 0 = use default (5MB)
 }
 
 type Auth struct {

@@ -96,7 +96,7 @@ func (m DiffModel) View() string {
 			"",
 			strings.Join(lines, "\n"),
 			"",
-			hint.Render("  j/k navigate   enter diff   esc close"),
+			hint.Render("  j/k navigate   enter select   esc close"),
 		)
 	}
 
@@ -122,7 +122,7 @@ func unifiedDiff(oldText, newText string) string {
 	oldLines := strings.Split(oldText, "\n")
 	newLines := strings.Split(newText, "\n")
 
-	lcs := computeLCS(oldLines, newLines)
+	lcs, truncated := computeLCS(oldLines, newLines)
 	var sb strings.Builder
 
 	type hunk struct {
@@ -159,6 +159,10 @@ func unifiedDiff(oldText, newText string) string {
 		}
 	}
 
+	if truncated {
+		sb.WriteString("\n" + statusWarn.Render("  diff truncated - responses exceed 500 lines per side"))
+	}
+
 	result := strings.TrimRight(sb.String(), "\n")
 	if result == "" {
 		return hint.Render("no differences")
@@ -167,20 +171,23 @@ func unifiedDiff(oldText, newText string) string {
 }
 
 // computeLCS returns the common subsequence as pairs of [oldIdx, newIdx].
-func computeLCS(a, b []string) [][2]int {
+// truncated is true when either input was capped at 500 lines.
+func computeLCS(a, b []string) ([][2]int, bool) {
 	m, n := len(a), len(b)
 	if m == 0 || n == 0 {
-		return nil
+		return nil, false
 	}
 
-	// limit size to avoid O(mn) blowup on huge responses
+	truncated := false
 	if m > 500 {
 		m = 500
 		a = a[:m]
+		truncated = true
 	}
 	if n > 500 {
 		n = 500
 		b = b[:n]
+		truncated = true
 	}
 
 	dp := make([][]int, m+1)
@@ -212,5 +219,5 @@ func computeLCS(a, b []string) [][2]int {
 			j++
 		}
 	}
-	return result
+	return result, truncated
 }

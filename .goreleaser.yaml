@@ -53,6 +53,46 @@ changelog:
     - title: Other
       order: 999
 
+# homebrew_casks replaces the deprecated brews section (deprecated since v2.10).
+# Binaries are distributed as pre-built archives; GoReleaser generates the cask .rb
+# and pushes it to d0mkaaa/homebrew-tap automatically on each tagged release.
+homebrew_casks:
+  - name: gopull
+    homepage: "https://github.com/d0mkaaa/gopull"
+    description: "A terminal HTTP client. Send requests, manage collections, inspect responses."
+    license: MIT
+    directory: Casks
+    binaries:
+      - gopull
+    repository:
+      owner: d0mkaaa
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "chore: update gopull cask to {{ .Tag }}"
+    caveats: |
+      gopull is not signed with an Apple Developer ID.
+      If macOS blocks the binary on first run, remove the quarantine flag:
+        xattr -d com.apple.quarantine "$(which gopull)"
+
+# GoReleaser generates gopull.json and pushes it to d0mkaaa/scoop-gopull root.
+# Manifests must be at the repo root for `scoop bucket list` to count them.
+scoops:
+  - name: gopull
+    homepage: "https://github.com/d0mkaaa/gopull"
+    description: "A terminal HTTP client. Send requests, manage collections, inspect responses."
+    license: MIT
+    repository:
+      owner: d0mkaaa
+      name: scoop-gopull
+      token: "{{ .Env.SCOOP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "chore: update gopull manifest to {{ .Tag }}"
+
 release:
   github:
     owner: d0mkaaa

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/d0mkaaa/gopull/internal/store"
 )
@@ -133,9 +134,21 @@ func (m RunnerModel) View() string {
 
 	var footer string
 	if m.done {
-		footer = hint.Render(fmt.Sprintf("done  %d requests  %d test pass  %d test fail    esc to close", len(m.results), pass, fail))
+		summary := testPass.Render(fmt.Sprintf("%d pass", pass))
+		if fail > 0 {
+			summary += "  " + testFail.Render(fmt.Sprintf("%d fail", fail))
+		}
+		footer = hint.Render(fmt.Sprintf("%d/%d done  ", total, len(m.results))) +
+			summary + hint.Render("   esc close")
 	} else {
-		footer = hint.Render("running...")
+		idx := m.currentRunningIdx()
+		if idx >= 0 && idx < len(m.results) {
+			footer = hint.Render("running  ") +
+				lipgloss.NewStyle().Foreground(colorAccent).Render(m.results[idx].name) +
+				hint.Render("...")
+		} else {
+			footer = hint.Render("running...")
+		}
 	}
 
 	content := m.renderResults()

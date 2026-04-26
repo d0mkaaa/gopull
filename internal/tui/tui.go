@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,17 +84,21 @@ type Model struct {
 	runner        RunnerModel
 	runnerVisible bool
 
-	store      *store.Store
-	configDir  string // ~/.config/gopull
-	plugins    *plugins.Runner
-	pluginInfo string // e.g. "2 plugins"
-	status     string
+	store           *store.Store
+	configDir       string // ~/.config/gopull
+	plugins         *plugins.Runner
+	pluginInfo      string
+	status          string
+	maxDisplayBytes int
+
+	version         string
+	updateAvailable string
 
 	width  int
 	height int
 }
 
-func New(st *store.Store) Model {
+func New(st *store.Store, version string) Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorAccent)
@@ -103,8 +109,8 @@ func New(st *store.Store) Model {
 	ep.KeyMap.Quit.SetEnabled(false)
 
 	ii := textinput.New()
-	ii.Placeholder = "path/to/collection.json"
-	ii.CharLimit = 512
+	ii.Placeholder = "path/to/file.json  or  https://api.example.com/openapi.json"
+	ii.CharLimit = 1024
 
 	m := Model{
 		sidebar:        newSidebar(30, 20),
@@ -117,8 +123,9 @@ func New(st *store.Store) Model {
 		sidebarVisible: true,
 		timeout:        30 * time.Second,
 		theme:          "dark",
-		store:     st,
-		configDir: st.Dir(),
+		store:          st,
+		configDir:      st.Dir(),
+		version:        version,
 	}
 	m.editor = m.editor.Focus()
 	return m
@@ -129,6 +136,7 @@ func (m Model) Init() tea.Cmd {
 		loadDataCmd(m.store),
 		loadPluginsCmd(filepath.Join(m.configDir, "plugins")),
 		loadUserThemesCmd(m.configDir),
+		checkUpdateCmd(m.version),
 		spinner.Tick,
 	)
 }
@@ -141,8 +149,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dataLoadedMsg:
 		m.theme = msg.theme
 		m.timeout = msg.timeout
+		m.maxDisplayBytes = msg.maxDisplayBytes
 		applyTheme(themeByID(msg.theme))
 		m.spin.Style = lipgloss.NewStyle().Foreground(colorAccent)
+		m.editor = m.editor.RefreshTheme()
 		m.sidebar = m.sidebar.Refresh(msg.cols)
 		m.sidebar = m.sidebar.RefreshTheme()
 		m.environments = msg.envs
@@ -218,7 +228,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.response = m.response.SetError(msg.err)
 		} else {
-			m.response = m.response.SetResult(msg.r)
+			if m.maxDisplayBytes > 0 && msg.r.size > m.maxDisplayBytes {
+				m.response = m.response.SetTooLarge(msg.r)
+			} else {
+				m.response = m.response.SetResult(msg.r)
+			}
 			cmds = append(cmds, appendHistoryCmd(m.store, msg.r, m.editor))
 			if script := m.editor.TestsScript(); script != "" {
 				res := tests.Run(script, msg.r.code, msg.rawBody)
@@ -336,6 +350,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case themeAppliedMsg:
 		m.theme = msg.theme
+		m.editor = m.editor.RefreshTheme()
 		m.sidebar = m.sidebar.RefreshTheme()
 		m.spin.Style = lipgloss.NewStyle().Foreground(colorAccent)
 		return m, saveThemeCmd(m.store, m.theme)
@@ -351,6 +366,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-apply the active theme: if it's a user theme that just loaded,
 		// this ensures the correct colors appear instead of the fallback.
 		applyTheme(themeByID(m.theme))
+		m.editor = m.editor.RefreshTheme()
 		m.sidebar = m.sidebar.RefreshTheme()
 		m.spin.Style = lipgloss.NewStyle().Foreground(colorAccent)
 		return m, nil
@@ -363,6 +379,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		themeRegistry[msg.themeID] = msg.theme
 		applyTheme(msg.theme)
 		m.theme = msg.themeID
+		m.editor = m.editor.RefreshTheme()
 		m.sidebar = m.sidebar.RefreshTheme()
 		m.spin.Style = lipgloss.NewStyle().Foreground(colorAccent)
 		m.settings = m.settings.ExitThemeEditor()
@@ -425,6 +442,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = ""
 		return m, nil
 
+	case updateCheckMsg:
+		if msg.latest != "" {
+			m.updateAvailable = msg.latest
+		}
+		return m, nil
+
 	case spinner.TickMsg:
 		if m.response.loading {
 			var cmd tea.Cmd
@@ -480,11 +503,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 
 		case key.Matches(msg, keys.Quit):
-			m.store.SaveState(&store.AppState{
-				ActiveEnvID:        m.activeEnvID,
-				ActiveCollectionID: m.sidebar.activeCollID,
-			})
-			return m, tea.Quit
+			return m, saveStateAndQuitCmd(m.store, m.activeEnvID, m.sidebar.activeCollID)
 
 		case key.Matches(msg, keys.Send):
 			return m.doSend()
@@ -614,11 +633,11 @@ func (m Model) View() string {
 		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
 
 	case m.importActive:
-		overlay := paneActive.Width(64).Render(
+		overlay := paneActive.Width(72).Render(
 			lipgloss.JoinVertical(lipgloss.Left,
-				sidebarTitle.Render("import postman collection"),
+				sidebarTitle.Render("import collection"),
 				"",
-				hint.Render("file path:"),
+				hint.Render("file path or URL  (.json  .http  OpenAPI):"),
 				m.importInput.View(),
 				"",
 				hint.Render("  enter import   esc cancel"),
@@ -727,25 +746,39 @@ func (m Model) viewHint() string {
 		switch m.focus {
 		case rfSidebar:
 			if m.sidebar.PendingDelete() {
-				mid = statusErr.Render("d again to confirm delete   esc cancel")
+				mid = statusErr.Render("d again to confirm   esc cancel")
 			} else if m.sidebar.InReqsMode() {
-				mid = "↑↓ navigate   enter open   d delete   esc back   tab→editor"
+				mid = "↑↓ navigate   enter open   d delete   esc back   tab next"
 			} else {
-				mid = "↑↓ navigate   enter open   d delete   tab→editor"
+				mid = "↑↓ navigate   enter open   r run   d delete   tab next"
 			}
 		case rfEditor:
-			mid = "ctrl+r send   ctrl+s save   alt+c curl   alt+e editor   alt+j format   [/] tab"
+			mid = "ctrl+r send   ctrl+s save   alt+n new   alt+j format   alt+m body mode   [/] tabs"
 		case rfResponse:
-			if m.response.InVisualMode() {
-				mid = "j/k extend selection   y copy   esc cancel"
-			} else {
-				mid = "j/k scroll   g/G top/btm   v select   / search   y copy   w save   D diff   [/] tab"
+			switch {
+			case m.response.InVisualMode():
+				mid = "j/k extend   y copy   esc cancel"
+			case m.response.InTreeMode():
+				mid = "j/k navigate   space toggle   c collapse   e expand   {/} sibling   t exit"
+			case m.response.HasJSONTree():
+				mid = "j/k scroll   / search   t tree   y copy   w save   D diff   [/] tabs"
+			default:
+				mid = "j/k scroll   / search   y copy   w save   D diff   [/] tabs"
 			}
 		}
 		mid = statusBar.Render(mid)
 	}
 
-	right := statusBar.Render("alt+p palette  ctrl+e env  alt+o settings  alt+q quit")
+	versionStr := "v" + m.version
+	if m.updateAvailable != "" {
+		versionStr = lipgloss.NewStyle().Foreground(colorWarn).Render("v"+m.version) +
+			lipgloss.NewStyle().Foreground(colorMuted).Render(" → ") +
+			lipgloss.NewStyle().Foreground(colorSuccess).Render("v"+m.updateAvailable+" available")
+	} else {
+		versionStr = lipgloss.NewStyle().Foreground(colorMuted).Render("v" + m.version)
+	}
+	right := statusBar.Render("alt+p palette  ctrl+e env  alt+o settings  alt+q quit") +
+		"  " + versionStr
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right) - 2
 	if gap < 1 {
@@ -790,6 +823,9 @@ func (m Model) execPaletteAction(msg paletteExecMsg) (tea.Model, tea.Cmd) {
 	case "export":
 		m.status = ""
 		return m.doExport()
+	case "export_http":
+		m.status = ""
+		return m.doExportHTTP()
 	case "curl_export":
 		return m.doCurlExport()
 	case "external_editor":
@@ -1061,10 +1097,19 @@ func (m Model) doSave() (tea.Model, tea.Cmd) {
 	m.status = ""
 	req := m.editor.BuildRequest()
 	if req.Name == "" {
-		req.Name = req.URL
-	}
-	if req.Name == "" {
-		req.Name = "Untitled"
+		if req.URL != "" {
+			if u, err := url.Parse(req.URL); err == nil && u.Path != "" && u.Path != "/" {
+				req.Name = req.Method + " " + u.Path
+			} else {
+				raw := req.URL
+				if len(raw) > 50 {
+					raw = raw[:50]
+				}
+				req.Name = raw
+			}
+		} else {
+			req.Name = req.Method + " request"
+		}
 	}
 
 	collID := m.editor.collectionID
@@ -1180,13 +1225,14 @@ func (m Model) focusPanel(p rootFocus) Model {
 }
 
 type dataLoadedMsg struct {
-	cols         []*store.Collection
-	envs         []*store.Environment
-	state        *store.AppState
-	timeout      time.Duration
-	theme        string
-	loadErr      string
-	keybindings  map[string]string
+	cols            []*store.Collection
+	envs            []*store.Environment
+	state           *store.AppState
+	timeout         time.Duration
+	theme           string
+	loadErr         string
+	keybindings     map[string]string
+	maxDisplayBytes int
 }
 
 func loadDataCmd(st *store.Store) tea.Cmd {
@@ -1213,15 +1259,20 @@ func loadDataCmd(st *store.Store) tea.Cmd {
 				theme = cfg.Theme
 			}
 		}
+		maxDisplay := 5 * 1024 * 1024
+		if cfg != nil && cfg.MaxDisplayBytes > 0 {
+			maxDisplay = cfg.MaxDisplayBytes
+		}
 		kb, _ := st.LoadKeybindings()
 		return dataLoadedMsg{
-			cols:        cols,
-			envs:        envs,
-			state:       state,
-			timeout:     timeout,
-			theme:       theme,
-			loadErr:     loadErr,
-			keybindings: kb,
+			cols:            cols,
+			envs:            envs,
+			state:           state,
+			timeout:         timeout,
+			theme:           theme,
+			loadErr:         loadErr,
+			keybindings:     kb,
+			maxDisplayBytes: maxDisplay,
 		}
 	}
 }
@@ -1283,11 +1334,41 @@ func deleteCollectionCmd(st *store.Store, collID string) tea.Cmd {
 
 func importFileCmd(st *store.Store, path string) tea.Cmd {
 	return func() tea.Msg {
+		// Remote URL: fetch and import as OpenAPI.
+		if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+			col, err := store.FetchAndImportOpenAPI(path)
+			if err != nil {
+				return importDoneMsg{err: err}
+			}
+			if err := st.SaveCollection(col); err != nil {
+				return importDoneMsg{err: fmt.Errorf("save: %w", err)}
+			}
+			return importDoneMsg{col: col}
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return importDoneMsg{err: fmt.Errorf("read file: %w", err)}
 		}
-		col, err := store.ImportPostman(data)
+
+		var col *store.Collection
+		ext := strings.ToLower(filepath.Ext(path))
+		switch {
+		case ext == ".http" || ext == ".rest" || store.LooksLikeHTTPFile(data):
+			col, err = store.ImportHTTPFile(data)
+			if err == nil && col != nil {
+				base := filepath.Base(path)
+				col.Name = strings.TrimSuffix(base, filepath.Ext(base))
+			}
+		case store.LooksLikeOpenAPI(data):
+			col, err = store.ImportOpenAPI(data)
+			if err == nil && col != nil {
+				base := filepath.Base(path)
+				col.Name = strings.TrimSuffix(base, filepath.Ext(base))
+			}
+		default:
+			col, err = store.ImportPostman(data)
+		}
 		if err != nil {
 			return importDoneMsg{err: err}
 		}
@@ -1295,6 +1376,41 @@ func importFileCmd(st *store.Store, path string) tea.Cmd {
 			return importDoneMsg{err: fmt.Errorf("save: %w", err)}
 		}
 		return importDoneMsg{col: col}
+	}
+}
+
+func (m Model) doExportHTTP() (tea.Model, tea.Cmd) {
+	collID := m.sidebar.activeCollID
+	if collID == "" {
+		m.status = "no collection open to export"
+		return m, clearStatusCmd()
+	}
+	st := m.store
+	return m, func() tea.Msg {
+		cols, err := st.LoadCollections()
+		if err != nil {
+			return exportDoneMsg{err: err}
+		}
+		var target *store.Collection
+		for _, c := range cols {
+			if c.ID == collID {
+				target = c
+				break
+			}
+		}
+		if target == nil {
+			return exportDoneMsg{err: fmt.Errorf("collection not found")}
+		}
+		data, err := store.ExportHTTPFile(target)
+		if err != nil {
+			return exportDoneMsg{err: err}
+		}
+		name := sanitizeFilename(target.Name) + ".http"
+		if err := os.WriteFile(name, data, 0o644); err != nil {
+			return exportDoneMsg{err: err}
+		}
+		abs, _ := filepath.Abs(name)
+		return exportDoneMsg{path: abs}
 	}
 }
 
@@ -1484,6 +1600,82 @@ func markWelcomeSeenCmd(st *store.Store) tea.Cmd {
 		_ = st.SaveState(state)
 		return nil
 	}
+}
+
+// saveStateAndQuitCmd persists session state (active env/collection) without
+// clobbering fields like SeenWelcome that are written elsewhere.
+func saveStateAndQuitCmd(st *store.Store, activeEnvID, activeCollID string) tea.Cmd {
+	return func() tea.Msg {
+		state, _ := st.LoadState()
+		if state == nil {
+			state = &store.AppState{}
+		}
+		state.ActiveEnvID = activeEnvID
+		state.ActiveCollectionID = activeCollID
+		_ = st.SaveState(state)
+		return tea.Quit()
+	}
+}
+
+type updateCheckMsg struct {
+	latest string
+}
+
+func checkUpdateCmd(current string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			"https://api.github.com/repos/d0mkaaa/gopull/releases/latest", nil)
+		if err != nil {
+			return updateCheckMsg{}
+		}
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return updateCheckMsg{}
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return updateCheckMsg{}
+		}
+		var release struct {
+			TagName string `json:"tag_name"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+			return updateCheckMsg{}
+		}
+		latest := strings.TrimPrefix(release.TagName, "v")
+		cur := strings.TrimPrefix(current, "v")
+		if latest != "" && semverGt(latest, cur) {
+			return updateCheckMsg{latest: latest}
+		}
+		return updateCheckMsg{}
+	}
+}
+
+// semverGt reports whether version a is strictly greater than b.
+// Both must be "major.minor.patch" strings; missing parts default to 0.
+func semverGt(a, b string) bool {
+	parse := func(s string) [3]int {
+		parts := strings.SplitN(s, ".", 3)
+		var out [3]int
+		for i := 0; i < 3 && i < len(parts); i++ {
+			v, _ := strconv.Atoi(parts[i])
+			out[i] = v
+		}
+		return out
+	}
+	av, bv := parse(a), parse(b)
+	for i := range av {
+		if av[i] > bv[i] {
+			return true
+		}
+		if av[i] < bv[i] {
+			return false
+		}
+	}
+	return false
 }
 
 func clearStatusCmd() tea.Cmd {

@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "description": "A terminal HTTP client",
+  "homepage": "https://github.com/d0mkaaa/gopull",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/d0mkaaa/gopull/releases/download/v0.2.0/gopull_0.2.0_windows_amd64.zip",
+      "bin": "gopull.exe"
+    }
+  },
+  "checkver": {
+    "github": "https://github.com/d0mkaaa/gopull"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/d0mkaaa/gopull/releases/download/v$version/gopull_$version_windows_amd64.zip"
+      }
+    }
+  }
+}

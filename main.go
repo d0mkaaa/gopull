@@ -11,7 +11,7 @@ import (
 	"github.com/d0mkaaa/gopull/internal/tui"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	ver := flag.Bool("version", false, "print version and exit")
@@ -28,7 +28,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(tui.New(st), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(tui.New(st, version), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, runErr := p.Run()
 
 	// OSC 111 resets the terminal background to its configured default,

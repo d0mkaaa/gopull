@@ -88,6 +88,8 @@ func Send(ctx context.Context, req Request) (*Response, error) {
 		if err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
 		}
+	} else {
+		transport.Proxy = http.ProxyFromEnvironment
 	}
 
 	c := &http.Client{Transport: transport}

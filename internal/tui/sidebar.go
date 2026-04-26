@@ -266,6 +266,18 @@ func (m SidebarModel) View() string {
 			}
 		}
 	}
+
+	if len(m.collections) == 0 && m.mode == modeCols {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			sidebarTitle.Render(title),
+			"",
+			hint.Render("  no collections yet"),
+			"",
+			hint.Render("  ctrl+s  save a request"),
+			hint.Render("  ctrl+i  import collection"),
+		)
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		sidebarTitle.Render(title),
 		m.list.View(),

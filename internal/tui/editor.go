@@ -61,6 +61,9 @@ type EditorModel struct {
 	inner    editorInner
 	focused  bool
 
+	methodCustom   bool   // true when user is typing a non-standard method
+	lastStdMethod  string // method value before entering custom mode
+
 	optsField        int // 0=skipVerify, 1=disableRedirects, 2=proxyURL, 3=timeout
 	skipVerify       bool
 	disableRedirects bool
@@ -89,14 +92,17 @@ func newEditor(w, h int) EditorModel {
 	b := textarea.New()
 	b.Placeholder = "Request body..."
 	b.ShowLineNumbers = false
+	b.Prompt = ""
 
 	h2 := textarea.New()
 	h2.Placeholder = "Content-Type: application/json\nAuthorization: Bearer token\n# X-Disabled-Header: value"
 	h2.ShowLineNumbers = false
+	h2.Prompt = ""
 
 	t := textarea.New()
 	t.Placeholder = "assert status == 200\nassert body contains \"id\"\nset TOKEN = $.data.access_token"
 	t.ShowLineNumbers = false
+	t.Prompt = ""
 
 	tok := textinput.New()
 	tok.Placeholder = "token"
@@ -135,7 +141,56 @@ func newEditor(w, h int) EditorModel {
 		width:         w,
 		height:        h,
 	}
-	return ed.setSize(w, h)
+	return ed.setSize(w, h).RefreshTheme()
+}
+
+// applyTextareaTheme stamps the current theme colors onto a textarea widget.
+func applyTextareaTheme(t *textarea.Model) {
+	base := lipgloss.NewStyle()
+	if colorBg != "" {
+		base = base.Background(colorBg)
+	}
+
+	t.FocusedStyle = textarea.Style{
+		Base:        base,
+		Text:        lipgloss.NewStyle().Foreground(colorText),
+		Placeholder: lipgloss.NewStyle().Foreground(colorMuted),
+		CursorLine:  base,
+		EndOfBuffer: lipgloss.NewStyle().Foreground(colorBorder),
+		Prompt:      lipgloss.NewStyle().Foreground(colorSubtle),
+	}
+	t.BlurredStyle = textarea.Style{
+		Base:        base,
+		Text:        lipgloss.NewStyle().Foreground(colorSubtle),
+		Placeholder: lipgloss.NewStyle().Foreground(colorBorder),
+		EndOfBuffer: lipgloss.NewStyle().Foreground(colorBorder),
+		Prompt:      lipgloss.NewStyle().Foreground(colorBorder),
+	}
+	t.Cursor.Style = lipgloss.NewStyle().Foreground(colorAccent)
+}
+
+// applyTextinputTheme stamps the current theme colors onto a textinput widget.
+func applyTextinputTheme(t *textinput.Model) {
+	t.PlaceholderStyle = lipgloss.NewStyle().Foreground(colorMuted)
+	t.TextStyle = lipgloss.NewStyle().Foreground(colorText)
+	t.PromptStyle = lipgloss.NewStyle().Foreground(colorSubtle)
+	t.Cursor.Style = lipgloss.NewStyle().Foreground(colorAccent)
+}
+
+// RefreshTheme re-applies the current theme palette to every input widget.
+// Call this after applyTheme() to keep input colors in sync.
+func (m EditorModel) RefreshTheme() EditorModel {
+	applyTextareaTheme(&m.bodyInput)
+	applyTextareaTheme(&m.headersInput)
+	applyTextareaTheme(&m.testsInput)
+	applyTextinputTheme(&m.method)
+	applyTextinputTheme(&m.url)
+	applyTextinputTheme(&m.tokenInput)
+	applyTextinputTheme(&m.userInput)
+	applyTextinputTheme(&m.passInput)
+	applyTextinputTheme(&m.proxyInput)
+	applyTextinputTheme(&m.perReqTimeout)
+	return m
 }
 
 func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
@@ -180,9 +235,31 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.inner == eiMethod && (km.Type == tea.KeyUp || km.Type == tea.KeyDown) {
-			m.cycleMethod(km.Type == tea.KeyDown)
-			return m, nil
+		if m.inner == eiMethod {
+			switch {
+			case (km.Type == tea.KeyUp || km.Type == tea.KeyDown) && !m.methodCustom:
+				m.cycleMethod(km.Type == tea.KeyDown)
+				return m, nil
+
+			case km.Type == tea.KeySpace && !m.methodCustom:
+				m.cycleMethod(true)
+				return m, nil
+
+			case km.Type == tea.KeyRunes && !m.methodCustom:
+				// First letter key: enter custom input mode.
+				m.lastStdMethod = strings.ToUpper(strings.TrimSpace(m.method.Value()))
+				if m.lastStdMethod == "" {
+					m.lastStdMethod = "GET"
+				}
+				m.methodCustom = true
+				m.method.SetValue(strings.ToUpper(string(km.Runes)))
+				return m, nil
+
+			case km.Type == tea.KeyEsc && m.methodCustom:
+				m.methodCustom = false
+				m.method.SetValue(m.lastStdMethod)
+				return m, nil
+			}
 		}
 
 		if m.inner == eiContent && m.tab == etAuth && m.authField < 0 {
@@ -241,6 +318,11 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 	switch m.inner {
 	case eiMethod:
 		m.method, cmd = m.method.Update(msg)
+		if m.methodCustom {
+			if v := strings.ToUpper(m.method.Value()); v != m.method.Value() {
+				m.method.SetValue(v)
+			}
+		}
 	case eiURL:
 		m.url, cmd = m.url.Update(msg)
 	case eiContent:
@@ -446,7 +528,11 @@ func (m EditorModel) View() string {
 
 	methodHint := ""
 	if m.inner == eiMethod && m.focused {
-		methodHint = hint.Render("  ↑↓")
+		if m.methodCustom {
+			methodHint = hint.Render("  enter confirm  esc cancel")
+		} else {
+			methodHint = hint.Render("  ↑↓ space cycle  letter custom")
+		}
 	}
 	topRow := lipgloss.JoinHorizontal(lipgloss.Center,
 		methodBadge(mv), methodHint, "  ", m.url.View(),
@@ -546,6 +632,7 @@ func (m EditorModel) viewOpts() string {
 func (m EditorModel) Focus() EditorModel {
 	m.focused = true
 	m.inner = eiMethod
+	m.methodCustom = false
 	m.method.Focus()
 	return m
 }

@@ -268,17 +268,20 @@ func (s *Store) DeleteCollection(collID string) error {
 func (s *Store) LoadConfig() (*Config, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir, "config.json"))
 	if os.IsNotExist(err) {
-		return &Config{TimeoutSecs: 30}, nil
+		return &Config{TimeoutSecs: 30, MaxDisplayBytes: 5 * 1024 * 1024}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
-		return &Config{TimeoutSecs: 30}, nil
+		return &Config{TimeoutSecs: 30, MaxDisplayBytes: 5 * 1024 * 1024}, nil
 	}
 	if c.TimeoutSecs <= 0 {
 		c.TimeoutSecs = 30
+	}
+	if c.MaxDisplayBytes <= 0 {
+		c.MaxDisplayBytes = 5 * 1024 * 1024
 	}
 	return &c, nil
 }

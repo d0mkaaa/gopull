@@ -3,7 +3,9 @@ package tui
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -62,7 +64,11 @@ type ResponseModel struct {
 	result   *result
 	err      error
 	loading  bool
+	tooLarge bool
 	focused  bool
+
+	jsonTree *jsonTreeState
+	treeView bool
 
 	testRows []TestRow
 
@@ -91,7 +97,9 @@ func newResponse(w, h int) ResponseModel {
 	}
 }
 
-func (m ResponseModel) InVisualMode() bool { return m.visualMode }
+func (m ResponseModel) InVisualMode() bool  { return m.visualMode }
+func (m ResponseModel) InTreeMode() bool    { return m.treeView && m.jsonTree != nil }
+func (m ResponseModel) HasJSONTree() bool   { return m.jsonTree != nil }
 
 func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 	// Exit visual mode on esc - highest priority, even before focused check.
@@ -133,9 +141,29 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 	}
 
 	if km, ok := msg.(tea.KeyMsg); ok {
+		// tooLarge mode: intercept all keys, offer limited actions.
+		if m.tooLarge && m.tab == rtBody {
+			switch {
+			case km.Type == tea.KeyEnter:
+				m.tooLarge = false
+				m = m.refreshViewport()
+			case km.String() == "t" && m.jsonTree != nil:
+				m.tooLarge = false
+				m.treeView = true
+				m = m.refreshViewportTree()
+			case km.String() == "s" && m.result != nil:
+				ct := m.result.contentType
+				body := m.result.plainBody
+				return m, func() tea.Msg { return saveResponseMsg{body: body, contentType: ct} }
+			case km.String() == "y" && m.result != nil:
+				copyToClipboard(m.result.plainBody)
+			}
+			return m, nil
+		}
+
 		switch {
 		case key.Matches(km, keys.Search):
-			if !m.visualMode {
+			if !m.visualMode && !m.treeView {
 				m.searching = true
 				m.searchInput.Focus()
 				return m, textinput.Blink
@@ -150,7 +178,40 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 			m = m.refreshViewport()
 			return m, nil
 
-		case km.String() == "v":
+		case km.String() == "t" && m.jsonTree != nil && m.tab == rtBody:
+			m.treeView = !m.treeView
+			if m.treeView {
+				m.visualMode = false
+			}
+			m = m.refreshViewport()
+			return m, nil
+
+		case km.Type == tea.KeySpace && m.treeView && m.jsonTree != nil:
+			m.jsonTree.toggle()
+			m = m.refreshViewportTree()
+			return m, nil
+
+		case km.String() == "c" && m.treeView && m.jsonTree != nil:
+			m.jsonTree.collapseAll()
+			m = m.refreshViewportTree()
+			return m, nil
+
+		case km.String() == "e" && m.treeView && m.jsonTree != nil:
+			m.jsonTree.expandAll()
+			m = m.refreshViewportTree()
+			return m, nil
+
+		case km.String() == "{" && m.treeView && m.jsonTree != nil:
+			m.jsonTree.jumpPrevSibling()
+			m = m.syncViewportToCursor()
+			return m, nil
+
+		case km.String() == "}" && m.treeView && m.jsonTree != nil:
+			m.jsonTree.jumpNextSibling()
+			m = m.syncViewportToCursor()
+			return m, nil
+
+		case km.String() == "v" && !m.treeView:
 			m.visualMode = !m.visualMode
 			if m.visualMode {
 				m.visualAnchor = m.viewport.YOffset
@@ -169,44 +230,74 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 			return m, nil
 
 		case km.String() == "j":
-			m.viewport.LineDown(1)
-			if m.visualMode {
-				m = m.refreshViewportBody()
+			if m.treeView && m.jsonTree != nil {
+				m.jsonTree.moveCursor(1)
+				m = m.syncViewportToCursor()
+			} else {
+				m.viewport.LineDown(1)
+				if m.visualMode {
+					m = m.refreshViewportBody()
+				}
 			}
 			return m, nil
 
 		case km.String() == "k":
-			m.viewport.LineUp(1)
-			if m.visualMode {
-				m = m.refreshViewportBody()
+			if m.treeView && m.jsonTree != nil {
+				m.jsonTree.moveCursor(-1)
+				m = m.syncViewportToCursor()
+			} else {
+				m.viewport.LineUp(1)
+				if m.visualMode {
+					m = m.refreshViewportBody()
+				}
 			}
 			return m, nil
 
 		case km.String() == "g":
-			m.viewport.GotoTop()
-			if m.visualMode {
-				m = m.refreshViewportBody()
+			if m.treeView && m.jsonTree != nil {
+				m.jsonTree.cursor = 0
+				m = m.syncViewportToCursor()
+			} else {
+				m.viewport.GotoTop()
+				if m.visualMode {
+					m = m.refreshViewportBody()
+				}
 			}
 			return m, nil
 
 		case km.String() == "G":
-			m.viewport.GotoBottom()
-			if m.visualMode {
-				m = m.refreshViewportBody()
+			if m.treeView && m.jsonTree != nil {
+				m.jsonTree.cursor = len(m.jsonTree.flat) - 1
+				m = m.syncViewportToCursor()
+			} else {
+				m.viewport.GotoBottom()
+				if m.visualMode {
+					m = m.refreshViewportBody()
+				}
 			}
 			return m, nil
 
 		case km.Type == tea.KeyCtrlD:
-			m.viewport.LineDown(m.viewport.Height / 2)
-			if m.visualMode {
-				m = m.refreshViewportBody()
+			if m.treeView && m.jsonTree != nil {
+				m.jsonTree.moveCursor(m.viewport.Height / 2)
+				m = m.syncViewportToCursor()
+			} else {
+				m.viewport.LineDown(m.viewport.Height / 2)
+				if m.visualMode {
+					m = m.refreshViewportBody()
+				}
 			}
 			return m, nil
 
 		case km.Type == tea.KeyCtrlU:
-			m.viewport.LineUp(m.viewport.Height / 2)
-			if m.visualMode {
-				m = m.refreshViewportBody()
+			if m.treeView && m.jsonTree != nil {
+				m.jsonTree.moveCursor(-(m.viewport.Height / 2))
+				m = m.syncViewportToCursor()
+			} else {
+				m.viewport.LineUp(m.viewport.Height / 2)
+				if m.visualMode {
+					m = m.refreshViewportBody()
+				}
 			}
 			return m, nil
 
@@ -310,7 +401,18 @@ func (m ResponseModel) View() string {
 		statusLine = hint.Render("no response yet")
 	}
 
-	tabNames := []string{"body", "headers"}
+	bodyLabel := "body"
+	if m.result != nil {
+		switch {
+		case strings.Contains(m.result.contentType, "json"):
+			bodyLabel = "body · json"
+		case strings.Contains(m.result.contentType, "xml"):
+			bodyLabel = "body · xml"
+		case strings.Contains(m.result.contentType, "html"):
+			bodyLabel = "body · html"
+		}
+	}
+	tabNames := []string{bodyLabel, "headers"}
 	if len(m.testRows) > 0 {
 		pass, total := 0, 0
 		for _, r := range m.testRows {
@@ -346,6 +448,8 @@ func (m ResponseModel) View() string {
 			Foreground(colorAccent).
 			Bold(true).
 			Render(fmt.Sprintf(" VISUAL  %d lines   y copy   esc cancel", nLines))
+	} else if m.treeView && m.jsonTree != nil {
+		extra = "\n" + hint.Render("tree   space toggle   c collapse all   e expand all   {/} sibling   t exit")
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -402,6 +506,9 @@ func (m ResponseModel) SetLoading(v bool) ResponseModel {
 		m.streaming = false
 		m.streamLines = nil
 		m.visualMode = false
+		m.tooLarge = false
+		m.jsonTree = nil
+		m.treeView = false
 		m.viewport.SetContent("")
 	}
 	return m
@@ -422,6 +529,7 @@ func (m ResponseModel) FinalizeStream(elapsed time.Duration, body []byte, ct str
 
 func (m ResponseModel) SetResult(r *result) ResponseModel {
 	m.loading = false
+	m.tooLarge = false
 	m.result = r
 	m.err = nil
 	m.tab = rtBody
@@ -429,6 +537,34 @@ func (m ResponseModel) SetResult(r *result) ResponseModel {
 	m.matchPositions = nil
 	m.matchIndex = 0
 	m.visualMode = false
+	m.jsonTree = nil
+	m.treeView = false
+	if strings.Contains(r.contentType, "json") {
+		if tree, err := parseJSONTree([]byte(r.plainBody)); err == nil {
+			m.jsonTree = tree
+		}
+	}
+	m.viewport.GotoTop()
+	return m.refreshViewport()
+}
+
+func (m ResponseModel) SetTooLarge(r *result) ResponseModel {
+	m.loading = false
+	m.tooLarge = true
+	m.result = r
+	m.err = nil
+	m.tab = rtBody
+	m.query = ""
+	m.matchPositions = nil
+	m.matchIndex = 0
+	m.visualMode = false
+	m.treeView = false
+	m.jsonTree = nil
+	if strings.Contains(r.contentType, "json") {
+		if tree, err := parseJSONTree([]byte(r.plainBody)); err == nil {
+			m.jsonTree = tree
+		}
+	}
 	m.viewport.GotoTop()
 	return m.refreshViewport()
 }
@@ -458,7 +594,11 @@ func (m ResponseModel) refreshViewport() ResponseModel {
 	}
 	switch m.tab {
 	case rtBody:
-		if m.query != "" {
+		if m.tooLarge {
+			m.viewport.SetContent(m.tooLargeView())
+		} else if m.treeView && m.jsonTree != nil {
+			m = m.syncViewportToCursor()
+		} else if m.query != "" {
 			m = m.applySearch(m.query)
 		} else if m.visualMode {
 			m = m.refreshViewportBody()
@@ -471,6 +611,50 @@ func (m ResponseModel) refreshViewport() ResponseModel {
 		m.viewport.SetContent(m.renderTestRows())
 	}
 	return m
+}
+
+func (m ResponseModel) tooLargeView() string {
+	if m.result == nil {
+		return ""
+	}
+	size := formatSize(m.result.size)
+	warn := lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
+	treeHint := ""
+	if m.jsonTree != nil {
+		treeHint = "\n" + hint.Render("t      tree view")
+	}
+	return warn.Render("response body too large to display  ("+size+")") + "\n\n" +
+		hint.Render("enter  show anyway") +
+		treeHint + "\n" +
+		hint.Render("s      save to file") + "\n" +
+		hint.Render("y      copy to clipboard")
+}
+
+func (m ResponseModel) syncViewportToCursor() ResponseModel {
+	if m.jsonTree == nil {
+		return m
+	}
+	cursor := m.jsonTree.cursor
+	vpH := m.viewport.Height
+	off := m.viewport.YOffset
+	if cursor < off {
+		off = cursor
+	} else if cursor >= off+vpH {
+		off = cursor - vpH + 1
+	}
+	if off < 0 {
+		off = 0
+	}
+	m.viewport.SetContent(m.jsonTree.render(m.viewport.Width))
+	m.viewport.YOffset = off
+	return m
+}
+
+func (m ResponseModel) refreshViewportTree() ResponseModel {
+	if m.jsonTree == nil || !m.treeView {
+		return m
+	}
+	return m.syncViewportToCursor()
 }
 
 // refreshViewportBody re-renders the body tab content, applying visual
@@ -635,7 +819,12 @@ func buildResult(body []byte, hdrs http.Header, status string, code int, elapsed
 		ct = strings.TrimSpace(ct[:idx])
 	}
 
-	plain := prettyJSON(body)
+	var plain string
+	if isXMLContentType(ct) {
+		plain = prettyXML(body)
+	} else {
+		plain = prettyJSON(body)
+	}
 	highlighted := highlight([]byte(plain), ct)
 	if highlighted == "" {
 		highlighted = plain
@@ -659,6 +848,40 @@ func prettyJSON(b []byte) string {
 		return buf.String()
 	}
 	return string(b)
+}
+
+func prettyXML(b []byte) string {
+	dec := xml.NewDecoder(bytes.NewReader(b))
+	dec.Strict = false
+
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	enc.Indent("", "  ")
+
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return string(b) // fall back on bad XML
+		}
+		if err := enc.EncodeToken(tok); err != nil {
+			return string(b)
+		}
+	}
+	if err := enc.Flush(); err != nil {
+		return string(b)
+	}
+	if out := strings.TrimSpace(buf.String()); out != "" {
+		return out
+	}
+	return string(b)
+}
+
+func isXMLContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	return strings.Contains(ct, "xml")
 }
 
 func formatHeaders(h http.Header) string {
