@@ -85,17 +85,35 @@ func elapsedColor(d time.Duration) lipgloss.Style {
 }
 
 func renderTabs(names []string, active int, focused bool) string {
-	sep := lipgloss.NewStyle().Foreground(colorMuted).Render(" · ")
 	parts := make([]string, len(names))
 	for i, name := range names {
 		switch {
 		case i == active && focused:
-			parts[i] = tabActive.Render(name)
+			parts[i] = tabActive.Render("[" + name + "]")
 		case i == active:
-			parts[i] = tabFocused.Render(name)
+			parts[i] = tabFocused.Render("[" + name + "]")
 		default:
 			parts[i] = tabInactive.Render(name)
 		}
 	}
-	return strings.Join(parts, sep)
+	return strings.Join(parts, subtleText("  "))
+}
+
+func themedSpace(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	st := lipgloss.NewStyle()
+	if colorBg != "" {
+		st = st.Background(colorBg)
+	}
+	return st.Render(strings.Repeat(" ", n))
+}
+
+func subtleText(s string) string {
+	st := lipgloss.NewStyle().Foreground(colorMuted)
+	if colorBg != "" {
+		st = st.Background(colorBg)
+	}
+	return st.Render(s)
 }

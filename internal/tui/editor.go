@@ -54,15 +54,15 @@ type EditorModel struct {
 	userInput    textinput.Model
 	passInput    textinput.Model
 
-	tab      editorTab
-	bodyMode string // "raw" or "form"
-	authKind authKind
+	tab       editorTab
+	bodyMode  string // "raw" or "form"
+	authKind  authKind
 	authField int // 0=first, 1=second; -1=type selector
-	inner    editorInner
-	focused  bool
+	inner     editorInner
+	focused   bool
 
-	methodCustom   bool   // true when user is typing a non-standard method
-	lastStdMethod  string // method value before entering custom mode
+	methodCustom  bool   // true when user is typing a non-standard method
+	lastStdMethod string // method value before entering custom mode
 
 	optsField        int // 0=skipVerify, 1=disableRedirects, 2=proxyURL, 3=timeout
 	skipVerify       bool
@@ -107,7 +107,7 @@ func newEditor(w, h int) EditorModel {
 	tok := textinput.New()
 	tok.Placeholder = "token"
 	tok.EchoMode = textinput.EchoPassword
-	tok.EchoCharacter = '•'
+	tok.EchoCharacter = '*'
 
 	usr := textinput.New()
 	usr.Placeholder = "username"
@@ -115,7 +115,7 @@ func newEditor(w, h int) EditorModel {
 	pass := textinput.New()
 	pass.Placeholder = "password"
 	pass.EchoMode = textinput.EchoPassword
-	pass.EchoCharacter = '•'
+	pass.EchoCharacter = '*'
 
 	proxy := textinput.New()
 	proxy.Placeholder = "http://proxy:8080"
@@ -531,7 +531,7 @@ func (m EditorModel) View() string {
 		if m.methodCustom {
 			methodHint = hint.Render("  enter confirm  esc cancel")
 		} else {
-			methodHint = hint.Render("  ↑↓ space cycle  letter custom")
+			methodHint = hint.Render("  up/down space cycle  letter custom")
 		}
 	}
 	topRow := lipgloss.JoinHorizontal(lipgloss.Center,
@@ -580,7 +580,7 @@ func (m EditorModel) viewAuth() string {
 		}
 	}
 	if m.authField < 0 && m.focused {
-		typeParts = append([]string{hint.Render("←→ ")}, typeParts...)
+		typeParts = append([]string{hint.Render("<--> ")}, typeParts...)
 	}
 	typeRow := strings.Join(typeParts, "  ")
 
@@ -613,13 +613,13 @@ func (m EditorModel) viewOpts() string {
 	line := func(label string, val string, active bool) string {
 		sel := "  "
 		if active && focused {
-			sel = hint.Render("→ ")
+			sel = hint.Render("-> ")
 		}
 		return sel + hint.Render(fmt.Sprintf("%-20s", label)) + val
 	}
 
-	skipVal := boolStr(m.skipVerify) + hint.Render("  ← →")
-	redirVal := boolStr(m.disableRedirects) + hint.Render("  ← →")
+	skipVal := boolStr(m.skipVerify) + hint.Render("  <- ->")
+	redirVal := boolStr(m.disableRedirects) + hint.Render("  <- ->")
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		line("skip TLS verify", skipVal, m.optsField == 0),
@@ -627,6 +627,12 @@ func (m EditorModel) viewOpts() string {
 		line("proxy URL", m.proxyInput.View(), m.optsField == 2),
 		line("timeout override", m.perReqTimeout.View()+hint.Render(" sec  (0 = global)"), m.optsField == 3),
 	)
+}
+
+// IsEditingContent returns true when the user is actively typing in a textarea
+// or text field - used to suppress global single-character shortcuts like `?`.
+func (m EditorModel) IsEditingContent() bool {
+	return m.focused && m.inner == eiContent
 }
 
 func (m EditorModel) Focus() EditorModel {

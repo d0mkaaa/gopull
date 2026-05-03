@@ -84,10 +84,14 @@ type HistoryEntry struct {
 }
 
 type HistReq struct {
-	Method  string            `json:"method"`
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
+	Method   string            `json:"method"`
+	URL      string            `json:"url"`
+	Headers  map[string]string `json:"headers"`
+	Body     string            `json:"body"`
+	BodyMode string            `json:"body_mode,omitempty"`
+	Auth     Auth              `json:"auth,omitempty"`
+	Options  RequestOptions    `json:"options,omitempty"`
+	Tests    string            `json:"tests,omitempty"`
 }
 
 type HistResp struct {

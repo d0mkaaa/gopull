@@ -23,7 +23,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/d0mkaaa/gopull/internal/client"
+	"github.com/d0mkaaa/gopull/internal/core"
 	"github.com/d0mkaaa/gopull/internal/curlparse"
 	"github.com/d0mkaaa/gopull/internal/plugins"
 	"github.com/d0mkaaa/gopull/internal/store"
@@ -43,7 +43,7 @@ const (
 type envItem struct{ e *store.Environment }
 
 func (i envItem) Title() string       { return i.e.Name }
-func (i envItem) Description() string { return fmt.Sprintf("%d variables", len(i.e.Variables)) }
+func (i envItem) Description() string { return envSummary(i.e) }
 func (i envItem) FilterValue() string { return i.e.Name }
 
 type Model struct {
@@ -52,12 +52,16 @@ type Model struct {
 	response ResponseModel
 	spin     spinner.Model
 
-	envPicker        list.Model
-	envPickerVisible bool
-	environments     []*store.Environment
-	activeEnvID      string
-	activeEnvName    string
-	envVars          map[string]string
+	envPicker          list.Model
+	envPickerVisible   bool
+	envEditing         bool
+	envEditor          EnvEditorModel
+	pendingEnvDeleteID string
+	environments       []*store.Environment
+	activeEnvID        string
+	activeEnvName      string
+	envVars            map[string]string
+	envSecrets         map[string]bool
 
 	importInput  textinput.Model
 	importActive bool
@@ -75,11 +79,15 @@ type Model struct {
 	diff        DiffModel
 	diffVisible bool
 
+	history        HistoryModel
+	historyVisible bool
+
 	palette        PaletteModel
 	paletteVisible bool
 
-	welcomeVisible bool
-	welcomeStep    int
+	welcomeVisible    bool
+	welcomeStep       int
+	cheatsheetVisible bool
 
 	runner        RunnerModel
 	runnerVisible bool
@@ -118,6 +126,7 @@ func New(st *store.Store, version string) Model {
 		response:       newResponse(60, 20),
 		spin:           sp,
 		envPicker:      ep,
+		envEditor:      newEnvEditor(),
 		importInput:    ii,
 		focus:          rfEditor,
 		sidebarVisible: true,
@@ -155,6 +164,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor = m.editor.RefreshTheme()
 		m.sidebar = m.sidebar.Refresh(msg.cols)
 		m.sidebar = m.sidebar.RefreshTheme()
+		m.response = m.response.RefreshTheme()
 		m.environments = msg.envs
 		m.refreshEnvPicker()
 		if msg.state.ActiveEnvID != "" {
@@ -220,7 +230,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.status = "write failed: " + msg.err.Error()
 		} else {
-			m.status = "saved → " + msg.path
+			m.status = "saved -> " + msg.path
 		}
 		return m, clearStatusCmd()
 
@@ -235,7 +245,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			cmds = append(cmds, appendHistoryCmd(m.store, msg.r, m.editor))
 			if script := m.editor.TestsScript(); script != "" {
-				res := tests.Run(script, msg.r.code, msg.rawBody)
+				res := tests.Run(script, msg.r.code, msg.rawBody, msg.r.rawHeaders, msg.r.elapsed)
 				m.response = m.response.SetTestRows(buildTestRows(res))
 				for k, v := range res.EnvUpdates {
 					if m.envVars == nil {
@@ -280,7 +290,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, appendHistoryCmd(m.store, m.response.result, m.editor))
 		}
 		if script := m.editor.TestsScript(); script != "" {
-			res := tests.Run(script, msg.code, msg.body)
+			res := tests.Run(script, msg.code, msg.body, formatHeaders(msg.headers), msg.elapsed)
 			m.response = m.response.SetTestRows(buildTestRows(res))
 			for k, v := range res.EnvUpdates {
 				if m.envVars == nil {
@@ -299,7 +309,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.runnerVisible = true
 				if len(m.runner.order) > 0 {
 					m.runner.running = true
-					return m, runNextRequestCmd(m.store, &m.runner, 0, m.envVars, m.timeout)
+					return m, runNextRequestCmd(m.store, &m.runner, 0, core.Env{Values: m.envVars, SecretKeys: m.envSecrets}, m.timeout, m.plugins)
 				}
 				return m, nil
 			}
@@ -310,7 +320,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runner = m.runner.SetResult(msg.idx, msg.result)
 		next := msg.idx + 1
 		if next < len(m.runner.order) {
-			return m, runNextRequestCmd(m.store, &m.runner, next, m.envVars, m.timeout)
+			return m, runNextRequestCmd(m.store, &m.runner, next, core.Env{Values: m.envVars, SecretKeys: m.envSecrets}, m.timeout, m.plugins)
 		}
 		m.runner.running = false
 		m.runner.done = true
@@ -329,6 +339,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diffVisible = true
 		return m, nil
 
+	case historyBrowserLoadedMsg:
+		if msg.err != nil {
+			m.status = "history failed: " + msg.err.Error()
+			return m, clearStatusCmd()
+		}
+		m.history = newHistory(msg.entries).SetSize(m.width-10, m.height-4)
+		m.historyVisible = true
+		return m, textinput.Blink
+
+	case historyActionMsg:
+		return m.handleHistoryAction(msg)
+
+	case environmentsUpdatedMsg:
+		if msg.err != nil {
+			m.status = "environment failed: " + msg.err.Error()
+			return m, clearStatusCmd()
+		}
+		m.environments = msg.envs
+		m.refreshEnvPicker()
+		m.pendingEnvDeleteID = ""
+		if msg.activeEnvID == "" {
+			m.activeEnvID = ""
+			m.activeEnvName = ""
+			m.envVars = nil
+			m.envSecrets = nil
+		} else {
+			for _, e := range msg.envs {
+				if e.ID == msg.activeEnvID {
+					m = m.applyEnv(e)
+					break
+				}
+			}
+		}
+		m.status = msg.status
+		return m, clearStatusCmd()
+
 	case importDoneMsg:
 		if msg.err != nil {
 			m.status = "import failed: " + msg.err.Error()
@@ -344,7 +390,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.status = "export failed: " + msg.err.Error()
 		} else {
-			m.status = "exported → " + msg.path
+			m.status = "exported -> " + msg.path
 		}
 		return m, clearStatusCmd()
 
@@ -352,6 +398,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.theme = msg.theme
 		m.editor = m.editor.RefreshTheme()
 		m.sidebar = m.sidebar.RefreshTheme()
+		m.response = m.response.RefreshTheme()
 		m.spin.Style = lipgloss.NewStyle().Foreground(colorAccent)
 		return m, saveThemeCmd(m.store, m.theme)
 
@@ -368,6 +415,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		applyTheme(themeByID(m.theme))
 		m.editor = m.editor.RefreshTheme()
 		m.sidebar = m.sidebar.RefreshTheme()
+		m.response = m.response.RefreshTheme()
 		m.spin.Style = lipgloss.NewStyle().Foreground(colorAccent)
 		return m, nil
 
@@ -381,6 +429,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.theme = msg.themeID
 		m.editor = m.editor.RefreshTheme()
 		m.sidebar = m.sidebar.RefreshTheme()
+		m.response = m.response.RefreshTheme()
 		m.spin.Style = lipgloss.NewStyle().Foreground(colorAccent)
 		m.settings = m.settings.ExitThemeEditor()
 		m.settings.themes = AllThemeOptions()
@@ -430,6 +479,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_ = os.Remove(msg.tmpFile)
 		return m, nil
 
+	case renameCollectionMsg:
+		return m, func() tea.Msg {
+			if err := m.store.RenameCollection(msg.collID, msg.name); err != nil {
+				return errMsg{err}
+			}
+			cols, err := m.store.LoadCollections()
+			if err != nil {
+				return errMsg{err}
+			}
+			return collectionsUpdatedMsg{cols: cols, status: "renamed"}
+		}
+
+	case renameRequestMsg:
+		return m, func() tea.Msg {
+			if err := m.store.RenameRequest(msg.collID, msg.reqID, msg.name); err != nil {
+				return errMsg{err}
+			}
+			cols, err := m.store.LoadCollections()
+			if err != nil {
+				return errMsg{err}
+			}
+			return collectionsUpdatedMsg{cols: cols, status: "renamed"}
+		}
+
+	case duplicateRequestMsg:
+		return m, func() tea.Msg {
+			dup, err := m.store.DuplicateRequest(msg.collID, msg.reqID)
+			if err != nil {
+				return errMsg{err}
+			}
+			cols, err := m.store.LoadCollections()
+			if err != nil {
+				return errMsg{err}
+			}
+			_ = dup
+			return collectionsUpdatedMsg{cols: cols, status: "duplicated"}
+		}
+
+	case moveRequestMsg:
+		return m, func() tea.Msg {
+			if err := m.store.MoveRequest(msg.collID, msg.reqID, msg.delta); err != nil {
+				return errMsg{err}
+			}
+			cols, err := m.store.LoadCollections()
+			if err != nil {
+				return errMsg{err}
+			}
+			return collectionsUpdatedMsg{cols: cols}
+		}
+
 	case curlCopiedMsg:
 		m.status = "curl command copied to clipboard"
 		return m, clearStatusCmd()
@@ -474,6 +573,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.paletteVisible {
 			return m.updatePalette(msg)
 		}
+		if m.historyVisible {
+			return m.updateHistory(msg)
+		}
 		if m.diffVisible {
 			var cmd tea.Cmd
 			m.diff, cmd = m.diff.Update(msg)
@@ -492,11 +594,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.envPickerVisible {
 			return m.updateEnvPicker(msg)
 		}
+		if m.cheatsheetVisible {
+			m.cheatsheetVisible = false
+			return m, nil
+		}
 		if m.importActive {
 			return m.updateImportOverlay(msg)
 		}
 
 		switch {
+		case msg.String() == "?" && !m.editor.IsEditingContent():
+			m.cheatsheetVisible = true
+			return m, nil
+
 		case key.Matches(msg, keys.Palette):
 			m.palette = newPalette(m.sidebar.Collections())
 			m.paletteVisible = true
@@ -533,7 +643,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.EnvPicker):
 			m.envPickerVisible = true
+			m.pendingEnvDeleteID = ""
 			return m, nil
+
+		case key.Matches(msg, keys.History):
+			return m, loadHistoryBrowserCmd(m.store)
 
 		case key.Matches(msg, keys.Import):
 			m.importActive = true
@@ -587,7 +701,7 @@ func (m Model) View() string {
 			s = paneActive
 		}
 		panes = append(panes, s.Width(m.sidebarPaneWidth()).Render(m.sidebar.View()))
-		panes = append(panes, " ")
+		panes = append(panes, themedSpace(1))
 	}
 
 	edStyle := pane
@@ -595,7 +709,7 @@ func (m Model) View() string {
 		edStyle = paneActive
 	}
 	panes = append(panes, edStyle.Width(m.editorPaneWidth()).Render(m.editor.View()))
-	panes = append(panes, " ")
+	panes = append(panes, themedSpace(1))
 
 	respStyle := pane
 	if m.focus == rfResponse {
@@ -624,8 +738,16 @@ func (m Model) View() string {
 		overlay := paneActive.Width(60).Render(m.palette.View())
 		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
 
+	case m.historyVisible:
+		overlay := paneActive.Width(min(m.width-4, 116)).Render(m.history.SetSize(min(m.width-10, 112), m.height-4).View())
+		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+
 	case m.runnerVisible:
 		overlay := paneActive.Width(m.responsePaneWidth()).Render(m.runner.View())
+		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+
+	case m.cheatsheetVisible:
+		overlay := paneActive.Width(min(m.width-4, 110)).Render(viewCheatsheet(m.width, m.height))
 		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
 
 	case m.settingsVisible:
@@ -646,13 +768,11 @@ func (m Model) View() string {
 		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
 
 	case m.envPickerVisible:
-		overlay := paneActive.Width(44).Render(
-			lipgloss.JoinVertical(lipgloss.Left,
-				sidebarTitle.Render("environments"),
-				m.envPicker.View(),
-				hint.Render("  enter select   esc cancel"),
-			),
-		)
+		w := 72
+		if m.envEditing {
+			w = min(m.width-4, 82)
+		}
+		overlay := paneActive.Width(w).Render(m.viewEnvManager())
 		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
 
 	default:
@@ -748,9 +868,9 @@ func (m Model) viewHint() string {
 			if m.sidebar.PendingDelete() {
 				mid = statusErr.Render("d again to confirm   esc cancel")
 			} else if m.sidebar.InReqsMode() {
-				mid = "↑↓ navigate   enter open   d delete   esc back   tab next"
+				mid = "up/down navigate   enter open   n rename   ctrl+d duplicate   ctrl+j/k move   d delete   esc back"
 			} else {
-				mid = "↑↓ navigate   enter open   r run   d delete   tab next"
+				mid = "up/down navigate   enter open   r run   n rename   d delete   tab next"
 			}
 		case rfEditor:
 			mid = "ctrl+r send   ctrl+s save   alt+n new   alt+j format   alt+m body mode   [/] tabs"
@@ -772,20 +892,24 @@ func (m Model) viewHint() string {
 	versionStr := "v" + m.version
 	if m.updateAvailable != "" {
 		versionStr = lipgloss.NewStyle().Foreground(colorWarn).Render("v"+m.version) +
-			lipgloss.NewStyle().Foreground(colorMuted).Render(" → ") +
+			lipgloss.NewStyle().Foreground(colorMuted).Render(" -> ") +
 			lipgloss.NewStyle().Foreground(colorSuccess).Render("v"+m.updateAvailable+" available")
 	} else {
 		versionStr = lipgloss.NewStyle().Foreground(colorMuted).Render("v" + m.version)
 	}
-	right := statusBar.Render("alt+p palette  ctrl+e env  alt+o settings  alt+q quit") +
+	right := statusBar.Render("alt+p palette  ctrl+e env  alt+h history  alt+o settings  alt+q quit") +
 		"  " + versionStr
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right) - 2
 	if gap < 1 {
 		gap = 1
 	}
-	bar := left + "  " + mid + strings.Repeat(" ", gap) + right
-	sep := lipgloss.NewStyle().Foreground(colorBorder).Render(strings.Repeat("─", m.width))
+	bar := left + themedSpace(2) + mid + themedSpace(gap) + right
+	sepStyle := lipgloss.NewStyle().Foreground(colorBorder)
+	if colorBg != "" {
+		sepStyle = sepStyle.Background(colorBg)
+	}
+	sep := sepStyle.Render(strings.Repeat("-", m.width))
 	return sep + "\n" + bar
 }
 
@@ -815,6 +939,8 @@ func (m Model) execPaletteAction(msg paletteExecMsg) (tea.Model, tea.Cmd) {
 	case "env":
 		m.envPickerVisible = true
 		return m, nil
+	case "history":
+		return m, loadHistoryBrowserCmd(m.store)
 	case "import":
 		m.importActive = true
 		m.importInput.Focus()
@@ -853,18 +979,43 @@ func (m Model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateEnvPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.envEditing {
+		return m.updateEnvEditor(msg)
+	}
 	switch msg.Type {
 	case tea.KeyEsc:
+		m.pendingEnvDeleteID = ""
 		m.envPickerVisible = false
 		return m, nil
 	case tea.KeyEnter:
-		if item := m.envPicker.SelectedItem(); item != nil {
-			if ei, ok := item.(envItem); ok {
-				m = m.applyEnv(ei.e)
-			}
+		if e := selectedEnv(m); e != nil {
+			m = m.applyEnv(e)
 		}
+		m.pendingEnvDeleteID = ""
 		m.envPickerVisible = false
 		return m, nil
+	case tea.KeyRunes:
+		if envListFiltering(m.envPicker) {
+			break
+		}
+		switch msg.String() {
+		case "n":
+			return m.startEnvEdit(nil)
+		case "e":
+			if e := selectedEnv(m); e != nil {
+				return m.startEnvEdit(e)
+			}
+			return m, nil
+		case "d":
+			e := selectedEnv(m)
+			if e == nil {
+				return m, nil
+			}
+			m.pendingEnvDeleteID = ""
+			return m, deleteEnvironmentCmd(m.store, e.ID, m.activeEnvID)
+		default:
+			m.pendingEnvDeleteID = ""
+		}
 	}
 	var cmd tea.Cmd
 	m.envPicker, cmd = m.envPicker.Update(msg)
@@ -883,6 +1034,7 @@ func (m Model) applyEnv(e *store.Environment) Model {
 	m.activeEnvID = e.ID
 	m.activeEnvName = e.Name
 	vars := make(map[string]string, len(e.Variables))
+	secrets := make(map[string]bool)
 	// dotenv file vars come first so inline variables can override them
 	if e.DotenvPath != "" {
 		for k, v := range parseDotenv(e.DotenvPath) {
@@ -892,9 +1044,15 @@ func (m Model) applyEnv(e *store.Environment) Model {
 	for _, v := range e.Variables {
 		if v.Enabled {
 			vars[v.Key] = v.Value
+			if v.Secret {
+				secrets[v.Key] = true
+			} else {
+				delete(secrets, v.Key)
+			}
 		}
 	}
 	m.envVars = vars
+	m.envSecrets = secrets
 	return m
 }
 
@@ -995,24 +1153,21 @@ func (m Model) doSend() (tea.Model, tea.Cmd) {
 	if req.Options.TimeoutSecs > 0 {
 		timeout = time.Duration(req.Options.TimeoutSecs) * time.Second
 	}
-	envVars := m.envVars
+	env := core.Env{Values: m.envVars, SecretKeys: m.envSecrets}
 	pluginRunner := m.plugins
 
 	return m, tea.Batch(m.spin.Tick, func() tea.Msg {
-		// pre_request plugins can modify method, url, headers, body
-		var pluginLogs []string
-		if pluginRunner != nil {
-			req, pluginLogs = pluginRunner.RunPreRequest(req, envVars)
-		}
-
-		cr := buildClientRequest(req, envVars)
-
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		resp, err := client.Send(ctx, cr)
+		run, err := core.RunRequest(ctx, req, env, core.RunOptions{Plugins: pluginRunner})
 		if err != nil {
-			return responseMsg{err: err, pluginLogs: pluginLogs}
+			logs := []string(nil)
+			if run != nil {
+				logs = run.PluginLogs
+			}
+			return responseMsg{err: err, pluginLogs: logs}
 		}
+		resp := run.Response
 		if resp.Stream != nil {
 			return streamReadyMsg{
 				stream:     resp.Stream,
@@ -1025,72 +1180,13 @@ func (m Model) doSend() (tea.Model, tea.Cmd) {
 
 		r := buildResult(resp.Body, resp.Headers, resp.Status, resp.StatusCode, resp.Elapsed)
 
-		// post_response plugins can extract env variables
-		var envUpdates map[string]string
-		if pluginRunner != nil {
-			snap := plugins.RespSnapshot{
-				StatusCode:  resp.StatusCode,
-				ElapsedMs:   resp.Elapsed.Milliseconds(),
-				SizeBytes:   len(resp.Body),
-				Body:        string(resp.Body),
-				ContentType: resp.Headers.Get("Content-Type"),
-			}
-			var postLogs []string
-			envUpdates, postLogs = pluginRunner.RunPostResponse(req, snap, envVars)
-			pluginLogs = append(pluginLogs, postLogs...)
-		}
-
 		return responseMsg{
 			r:          r,
 			rawBody:    resp.Body,
-			envUpdates: envUpdates,
-			pluginLogs: pluginLogs,
+			envUpdates: run.EnvUpdates,
+			pluginLogs: run.PluginLogs,
 		}
 	})
-}
-
-func buildClientRequest(req store.Request, envVars map[string]string) client.Request {
-	cr := client.Request{
-		Method:  req.Method,
-		URL:     req.URL,
-		Body:    req.Body.Raw,
-		Env:     envVars,
-		Auth:    client.Auth{Type: req.Auth.Type, Token: req.Auth.Token, User: req.Auth.User, Pass: req.Auth.Pass},
-		Headers: make(map[string]string, len(req.Headers)),
-		Options: client.Options{
-			SkipTLSVerify:    req.Options.SkipTLSVerify,
-			DisableRedirects: req.Options.DisableRedirects,
-			ProxyURL:         req.Options.ProxyURL,
-		},
-	}
-	for _, h := range req.Headers {
-		if h.Enabled {
-			cr.Headers[h.Key] = h.Value
-		}
-	}
-	switch req.Body.Mode {
-	case "form":
-		vals := url.Values{}
-		for _, line := range strings.Split(req.Body.Raw, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			idx := strings.Index(line, ":")
-			if idx < 0 {
-				continue
-			}
-			vals.Set(strings.TrimSpace(line[:idx]), strings.TrimSpace(line[idx+1:]))
-		}
-		cr.Body = vals.Encode()
-		cr.Headers["Content-Type"] = "application/x-www-form-urlencoded"
-	case "graphql":
-		cr.Body = req.Body.Raw
-		if _, ok := cr.Headers["Content-Type"]; !ok {
-			cr.Headers["Content-Type"] = "application/json"
-		}
-	}
-	return cr
 }
 
 func (m Model) doSave() (tea.Model, tea.Cmd) {
@@ -1182,7 +1278,9 @@ func (m *Model) relayout() {
 	m.editor = m.editor.setSize(edW, ph)
 	m.response = m.response.SetSize(respW, ph)
 
-	m.envPicker.SetSize(44, min(len(m.environments)+4, 14))
+	m.envPicker.SetSize(68, min(len(m.environments)+4, 14))
+	m.envEditor = m.envEditor.SetSize(72, ph)
+	m.history = m.history.SetSize(min(m.width-10, 112), ph)
 }
 
 func (m Model) sidebarPaneWidth() int {
@@ -1288,9 +1386,14 @@ func appendHistoryCmd(st *store.Store, r *result, ed EditorModel) tea.Cmd {
 	}
 	entry := store.HistoryEntry{
 		Request: store.HistReq{
-			Method: req.Method,
-			URL:    req.URL,
-			Body:   req.Body.Raw,
+			Method:   req.Method,
+			URL:      req.URL,
+			Headers:  make(map[string]string),
+			Body:     req.Body.Raw,
+			BodyMode: req.Body.Mode,
+			Auth:     req.Auth,
+			Options:  req.Options,
+			Tests:    req.Tests,
 		},
 		Response: store.HistResp{
 			StatusCode:  r.code,
@@ -1299,6 +1402,11 @@ func appendHistoryCmd(st *store.Store, r *result, ed EditorModel) tea.Cmd {
 			Body:        body,
 			ContentType: r.contentType,
 		},
+	}
+	for _, h := range req.Headers {
+		if h.Enabled {
+			entry.Request.Headers[h.Key] = h.Value
+		}
 	}
 	return func() tea.Msg {
 		_ = st.AppendHistory(entry)
@@ -1471,7 +1579,7 @@ func saveSettingsCmd(st *store.Store, theme string, timeoutSecs int) tea.Cmd {
 	}
 }
 
-func runNextRequestCmd(st *store.Store, runner *RunnerModel, idx int, env map[string]string, timeout time.Duration) tea.Cmd {
+func runNextRequestCmd(st *store.Store, runner *RunnerModel, idx int, env core.Env, timeout time.Duration, pluginRunner *plugins.Runner) tea.Cmd {
 	if idx < 0 || idx >= len(runner.order) {
 		return nil
 	}
@@ -1484,48 +1592,6 @@ func runNextRequestCmd(st *store.Store, runner *RunnerModel, idx int, env map[st
 	}
 	collectionReq := *req
 	return func() tea.Msg {
-		cr := client.Request{
-			Method:  collectionReq.Method,
-			URL:     collectionReq.URL,
-			Env:     env,
-			Headers: make(map[string]string),
-			Auth: client.Auth{
-				Type:  collectionReq.Auth.Type,
-				Token: collectionReq.Auth.Token,
-				User:  collectionReq.Auth.User,
-				Pass:  collectionReq.Auth.Pass,
-			},
-		}
-		for _, h := range collectionReq.Headers {
-			if h.Enabled {
-				cr.Headers[h.Key] = h.Value
-			}
-		}
-		if collectionReq.Body.Mode == "form" {
-			vals := url.Values{}
-			for _, line := range strings.Split(collectionReq.Body.Raw, "\n") {
-				line = strings.TrimSpace(line)
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-				i := strings.Index(line, ":")
-				if i < 0 {
-					continue
-				}
-				vals.Set(strings.TrimSpace(line[:i]), strings.TrimSpace(line[i+1:]))
-			}
-			cr.Body = vals.Encode()
-			cr.Headers["Content-Type"] = "application/x-www-form-urlencoded"
-		} else {
-			cr.Body = collectionReq.Body.Raw
-		}
-		if collectionReq.Options.SkipTLSVerify || collectionReq.Options.DisableRedirects || collectionReq.Options.ProxyURL != "" {
-			cr.Options = client.Options{
-				SkipTLSVerify:    collectionReq.Options.SkipTLSVerify,
-				DisableRedirects: collectionReq.Options.DisableRedirects,
-				ProxyURL:         collectionReq.Options.ProxyURL,
-			}
-		}
 		t := timeout
 		if collectionReq.Options.TimeoutSecs > 0 {
 			t = time.Duration(collectionReq.Options.TimeoutSecs) * time.Second
@@ -1533,19 +1599,20 @@ func runNextRequestCmd(st *store.Store, runner *RunnerModel, idx int, env map[st
 		ctx, cancel := context.WithTimeout(context.Background(), t)
 		defer cancel()
 		start := time.Now()
-		resp, err := client.Send(ctx, cr)
+		run, err := core.RunRequest(ctx, collectionReq, env, core.RunOptions{Plugins: pluginRunner})
 		elapsed := time.Since(start)
 		rr := runnerResult{name: collectionReq.Name, done: true, elapsed: elapsed}
 		if err != nil {
 			rr.err = err.Error()
 			return runnerResultMsg{idx: idx, result: rr}
 		}
+		resp := run.Response
 		if resp.Stream != nil {
 			resp.Stream.Close()
 		}
 		rr.code = resp.StatusCode
 		if collectionReq.Tests != "" {
-			res := tests.Run(collectionReq.Tests, resp.StatusCode, resp.Body)
+			res := tests.Run(collectionReq.Tests, resp.StatusCode, resp.Body, formatHeaders(resp.Headers), elapsed)
 			for _, a := range res.Assertions {
 				if a.Pass {
 					rr.pass++

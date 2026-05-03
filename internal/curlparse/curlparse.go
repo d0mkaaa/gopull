@@ -66,7 +66,7 @@ func Parse(s string) (store.Request, error) {
 			}
 		}
 
-		// Expand combined short flags: -sSL → -s -S -L
+		// Expand combined short flags: -sSL -> -s -S -L
 		if len(t) > 2 && t[0] == '-' && t[1] != '-' {
 			var expanded []string
 			for _, c := range t[1:] {

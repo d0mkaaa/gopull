@@ -260,6 +260,25 @@ func TestStoreLoadEnvironmentsEmptyDir(t *testing.T) {
 	}
 }
 
+func TestStoreDeleteEnvironment(t *testing.T) {
+	s := newTestStore(t)
+	env := &Environment{Name: "Local"}
+	if err := s.SaveEnvironment(env); err != nil {
+		t.Fatalf("SaveEnvironment: %v", err)
+	}
+
+	if err := s.DeleteEnvironment(env.ID); err != nil {
+		t.Fatalf("DeleteEnvironment: %v", err)
+	}
+	envs, err := s.LoadEnvironments()
+	if err != nil {
+		t.Fatalf("LoadEnvironments: %v", err)
+	}
+	if len(envs) != 0 {
+		t.Fatalf("got %d environments, want 0", len(envs))
+	}
+}
+
 func TestStoreHistoryRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 
@@ -281,6 +300,59 @@ func TestStoreHistoryRoundTrip(t *testing.T) {
 	}
 	if h.Entries[0].Response.StatusCode != 200 {
 		t.Fatalf("status: got %d", h.Entries[0].Response.StatusCode)
+	}
+}
+
+func TestStoreHistoryReplayFieldsRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+
+	entry := HistoryEntry{
+		Request: HistReq{
+			Method:   "POST",
+			URL:      "https://example.com/login",
+			Headers:  map[string]string{"Content-Type": "application/json"},
+			Body:     `{"user":"alice"}`,
+			BodyMode: "raw",
+			Auth:     Auth{Type: "bearer", Token: "{{TOKEN}}"},
+			Options:  RequestOptions{TimeoutSecs: 5},
+			Tests:    "assert status == 200",
+		},
+		Response: HistResp{StatusCode: 200},
+	}
+	if err := s.AppendHistory(entry); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+
+	h, err := s.LoadHistory()
+	if err != nil {
+		t.Fatalf("LoadHistory: %v", err)
+	}
+	got := h.Entries[0].Request
+	if got.BodyMode != "raw" || got.Auth.Token != "{{TOKEN}}" || got.Options.TimeoutSecs != 5 || got.Tests == "" {
+		t.Fatalf("replay fields not preserved: %+v", got)
+	}
+}
+
+func TestStoreHistoryOldSchemaStillLoads(t *testing.T) {
+	s := newTestStore(t)
+	path := filepath.Join(s.Dir(), "history.json")
+	data := []byte(`{
+  "version": 1,
+  "entries": [{
+    "request": {"method": "GET", "url": "https://example.com", "headers": {"Accept": "application/json"}, "body": ""},
+    "response": {"status_code": 200}
+  }]
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	h, err := s.LoadHistory()
+	if err != nil {
+		t.Fatalf("LoadHistory: %v", err)
+	}
+	if len(h.Entries) != 1 || h.Entries[0].Request.URL != "https://example.com" {
+		t.Fatalf("old history schema did not load: %+v", h)
 	}
 }
 

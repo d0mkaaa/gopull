@@ -45,6 +45,7 @@ type result struct {
 	rawHeaders  string
 	contentType string
 	size        int
+	binary      bool
 }
 
 type ResponseModel struct {
@@ -97,9 +98,9 @@ func newResponse(w, h int) ResponseModel {
 	}
 }
 
-func (m ResponseModel) InVisualMode() bool  { return m.visualMode }
-func (m ResponseModel) InTreeMode() bool    { return m.treeView && m.jsonTree != nil }
-func (m ResponseModel) HasJSONTree() bool   { return m.jsonTree != nil }
+func (m ResponseModel) InVisualMode() bool { return m.visualMode }
+func (m ResponseModel) InTreeMode() bool   { return m.treeView && m.jsonTree != nil }
+func (m ResponseModel) HasJSONTree() bool  { return m.jsonTree != nil }
 
 func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 	// Exit visual mode on esc - highest priority, even before focused check.
@@ -301,7 +302,7 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 			}
 			return m, nil
 
-		case km.String() == "D" && m.result != nil:
+		case km.String() == "D" && m.result != nil && !m.result.binary:
 			body := m.result.plainBody
 			return m, func() tea.Msg { return openDiffMsg{currentBody: body} }
 
@@ -391,7 +392,7 @@ func (m ResponseModel) View() string {
 	case m.result != nil:
 		pct := int(m.viewport.ScrollPercent() * 100)
 		elapsedStr := m.result.elapsed.Round(time.Millisecond).String()
-		pipe := lipgloss.NewStyle().Foreground(colorBorder).Render(" │ ")
+		pipe := lipgloss.NewStyle().Foreground(colorBorder).Render(" | ")
 		statusLine = statusStyle(m.result.code).Render(m.result.status) +
 			pipe + elapsedColor(m.result.elapsed).Render(elapsedStr) +
 			pipe + hint.Render(formatSize(m.result.size)) +
@@ -405,11 +406,11 @@ func (m ResponseModel) View() string {
 	if m.result != nil {
 		switch {
 		case strings.Contains(m.result.contentType, "json"):
-			bodyLabel = "body · json"
+			bodyLabel = "body - json"
 		case strings.Contains(m.result.contentType, "xml"):
-			bodyLabel = "body · xml"
+			bodyLabel = "body - xml"
 		case strings.Contains(m.result.contentType, "html"):
-			bodyLabel = "body · html"
+			bodyLabel = "body - html"
 		}
 	}
 	tabNames := []string{bodyLabel, "headers"}
@@ -493,6 +494,10 @@ func (m ResponseModel) SetSize(w, h int) ResponseModel {
 	m.height = h
 	m.viewport.Width = w - 4
 	m.viewport.Height = max(3, h-5)
+	return m.refreshViewport()
+}
+
+func (m ResponseModel) RefreshTheme() ResponseModel {
 	return m.refreshViewport()
 }
 
@@ -594,7 +599,9 @@ func (m ResponseModel) refreshViewport() ResponseModel {
 	}
 	switch m.tab {
 	case rtBody:
-		if m.tooLarge {
+		if m.result.binary {
+			m.viewport.SetContent(m.binaryView())
+		} else if m.tooLarge {
 			m.viewport.SetContent(m.tooLargeView())
 		} else if m.treeView && m.jsonTree != nil {
 			m = m.syncViewportToCursor()
@@ -611,6 +618,20 @@ func (m ResponseModel) refreshViewport() ResponseModel {
 		m.viewport.SetContent(m.renderTestRows())
 	}
 	return m
+}
+
+func (m ResponseModel) binaryView() string {
+	if m.result == nil {
+		return ""
+	}
+	warn := lipgloss.NewStyle().Foreground(colorSubtle).Bold(true)
+	ct := m.result.contentType
+	if ct == "" {
+		ct = "binary"
+	}
+	return warn.Render(ct+"  "+formatSize(m.result.size)) + "\n\n" +
+		hint.Render("w  save to file") + "\n" +
+		hint.Render("y  copy raw bytes to clipboard")
 }
 
 func (m ResponseModel) tooLargeView() string {
@@ -745,7 +766,7 @@ func (m ResponseModel) renderTestRows() string {
 		} else {
 			sb.WriteString(testFail.Render("FAIL") + "  " + r.label)
 			if r.actual != "" {
-				sb.WriteString(hint.Render("  →  " + r.actual))
+				sb.WriteString(hint.Render("  ->  " + r.actual))
 			}
 			sb.WriteString("\n")
 		}
@@ -819,6 +840,18 @@ func buildResult(body []byte, hdrs http.Header, status string, code int, elapsed
 		ct = strings.TrimSpace(ct[:idx])
 	}
 
+	if isBinaryContentType(ct) {
+		return &result{
+			status:      status,
+			code:        code,
+			elapsed:     elapsed,
+			rawHeaders:  formatHeaders(hdrs),
+			contentType: ct,
+			size:        len(body),
+			binary:      true,
+		}
+	}
+
 	var plain string
 	if isXMLContentType(ct) {
 		plain = prettyXML(body)
@@ -882,6 +915,17 @@ func prettyXML(b []byte) string {
 func isXMLContentType(ct string) bool {
 	ct = strings.ToLower(ct)
 	return strings.Contains(ct, "xml")
+}
+
+func isBinaryContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	return strings.HasPrefix(ct, "image/") ||
+		strings.HasPrefix(ct, "audio/") ||
+		strings.HasPrefix(ct, "video/") ||
+		ct == "application/octet-stream" ||
+		ct == "application/pdf" ||
+		ct == "application/zip" ||
+		ct == "application/gzip"
 }
 
 func formatHeaders(h http.Header) string {

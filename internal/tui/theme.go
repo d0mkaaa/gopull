@@ -67,7 +67,7 @@ var lightTheme = Theme{
 	name:        "light",
 	ChromaStyle: "github",
 
-	Background: lipgloss.Color("#eff1f5"), // catppuccin latte base
+	Background: lipgloss.Color("#ffffff"),
 
 	Accent:  lipgloss.Color("#8839ef"),
 	Muted:   lipgloss.Color("#acb0be"),
@@ -292,18 +292,18 @@ func LoadUserThemes(dir string) {
 }
 
 func applyTheme(t Theme) {
-	colorBg      = t.Background
-	colorAccent  = t.Accent
-	colorMuted   = t.Muted
-	colorBorder  = t.Border
+	colorBg = t.Background
+	colorAccent = t.Accent
+	colorMuted = t.Muted
+	colorBorder = t.Border
 	colorSuccess = t.Success
-	colorWarn    = t.Warn
-	colorError   = t.Error
-	colorSubtle  = t.Subtle
-	colorText    = t.Text
+	colorWarn = t.Warn
+	colorError = t.Error
+	colorSubtle = t.Subtle
+	colorText = t.Text
 	colorBadgeFg = t.BadgeFg
 
-	chromaStyle  = t.ChromaStyle
+	chromaStyle = t.ChromaStyle
 	methodColors = t.MethodColors
 
 	pane = lipgloss.NewStyle().
@@ -317,33 +317,37 @@ func applyTheme(t Theme) {
 	paneActive = pane.Copy().
 		BorderForeground(colorAccent)
 
-	statusOK   = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
+	statusOK = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
 	statusWarn = lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
-	statusErr  = lipgloss.NewStyle().Foreground(colorError).Bold(true)
+	statusErr = lipgloss.NewStyle().Foreground(colorError).Bold(true)
 
 	hint = lipgloss.NewStyle().Foreground(colorSubtle)
+	if colorBg != "" {
+		hint = hint.Background(colorBg)
+	}
 
-	// Tabs: accent/bold for the active+focused pane, dimmer accent for
-	// active-but-unfocused, muted for everything else.  No underline -
-	// color weight alone is the indicator and it renders consistently
-	// across every terminal.
 	tabActive = lipgloss.NewStyle().
 		Foreground(colorAccent).
-		Bold(true).
-		Padding(0, 1)
+		Bold(true)
 
 	tabFocused = lipgloss.NewStyle().
-		Foreground(colorSubtle).
-		Padding(0, 1)
+		Foreground(colorSubtle)
 
 	tabInactive = lipgloss.NewStyle().
-		Foreground(colorMuted).
-		Padding(0, 1)
+		Foreground(colorMuted)
+
+	if colorBg != "" {
+		tabActive = tabActive.Background(colorBg)
+		tabFocused = tabFocused.Background(colorBg)
+		tabInactive = tabInactive.Background(colorBg)
+	}
 
 	sidebarTitle = lipgloss.NewStyle().
 		Foreground(colorAccent).
-		Bold(true).
-		Padding(0, 1)
+		Bold(true)
+	if colorBg != "" {
+		sidebarTitle = sidebarTitle.Background(colorBg)
+	}
 
 	sidebarBack = lipgloss.NewStyle().
 		Foreground(colorMuted).
@@ -356,10 +360,18 @@ func applyTheme(t Theme) {
 
 	statusBar = lipgloss.NewStyle().
 		Foreground(colorSubtle)
+	if colorBg != "" {
+		statusBar = statusBar.Background(colorBg)
+	}
 
 	testPass = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
 	testFail = lipgloss.NewStyle().Foreground(colorError).Bold(true)
-	testSet  = lipgloss.NewStyle().Foreground(colorAccent)
+	testSet = lipgloss.NewStyle().Foreground(colorAccent)
+	if colorBg != "" {
+		testPass = testPass.Background(colorBg)
+		testFail = testFail.Background(colorBg)
+		testSet = testSet.Background(colorBg)
+	}
 
 	searchMatch = lipgloss.NewStyle().
 		Background(t.SearchMatchBg).

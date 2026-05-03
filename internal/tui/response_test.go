@@ -155,17 +155,18 @@ func TestRenderTabsSingleTab(t *testing.T) {
 	if !strings.Contains(out, "body") {
 		t.Errorf("single tab output missing name: %q", out)
 	}
-	// No separator expected with a single tab.
-	if strings.Count(out, "·") != 0 {
-		t.Errorf("single tab should have no separator, got: %q", out)
+	if strings.Contains(out, "  ") {
+		t.Errorf("single tab should have no spacer, got: %q", out)
 	}
 }
 
-func TestRenderTabsSeparatorPresent(t *testing.T) {
+func TestRenderTabsActiveMarkerAndSpacerPresent(t *testing.T) {
 	out := renderTabs([]string{"a", "b", "c"}, 0, true)
-	// The muted separator character should appear between tabs.
-	if !strings.Contains(out, "·") {
-		t.Error("renderTabs output should contain · separator")
+	if !strings.Contains(out, "[a]") {
+		t.Errorf("active tab should be bracketed, got: %q", out)
+	}
+	if !strings.Contains(out, "  ") {
+		t.Errorf("tabs should be spaced, got: %q", out)
 	}
 }
 

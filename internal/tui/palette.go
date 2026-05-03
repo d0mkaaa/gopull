@@ -32,6 +32,7 @@ var staticActions = []paletteItem{
 	{label: "Toggle Sidebar", detail: "alt+b", action: "sidebar"},
 	{label: "Settings", detail: "alt+o", action: "settings"},
 	{label: "Environment Picker", detail: "ctrl+e", action: "env"},
+	{label: "History Browser", detail: "alt+h", action: "history"},
 	{label: "Import Collection", detail: "ctrl+i  (.json or .http)", action: "import"},
 	{label: "Export Collection", detail: "ctrl+x  Postman JSON", action: "export"},
 	{label: "Export as .http", detail: "VS Code REST Client format", action: "export_http"},
@@ -164,6 +165,6 @@ func (m PaletteModel) View() string {
 		"",
 		list,
 		"",
-		hint.Render("  ↑↓ navigate   enter run   esc close"),
+		hint.Render("  up/down navigate   enter run   esc close"),
 	)
 }

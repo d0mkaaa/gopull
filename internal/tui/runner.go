@@ -77,15 +77,15 @@ func (m RunnerModel) renderResults() string {
 		var icon string
 		switch {
 		case !r.done && i == m.currentRunningIdx():
-			icon = hint.Render("↻")
+			icon = hint.Render("~")
 		case !r.done:
-			icon = hint.Render("·")
+			icon = hint.Render("-")
 		case r.err != "":
-			icon = testFail.Render("✗")
+			icon = testFail.Render("x")
 		case r.fail > 0:
-			icon = testFail.Render("✗")
+			icon = testFail.Render("x")
 		default:
-			icon = testPass.Render("✓")
+			icon = testPass.Render("ok")
 		}
 
 		line := icon + " " + r.name

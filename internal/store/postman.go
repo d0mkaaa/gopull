@@ -19,9 +19,9 @@ type pmInfo struct {
 }
 
 type pmItem struct {
-	Name    string    `json:"name"`
-	Item    []pmItem  `json:"item,omitempty"`    // folder
-	Request *pmReq    `json:"request,omitempty"` // leaf request
+	Name    string   `json:"name"`
+	Item    []pmItem `json:"item,omitempty"`    // folder
+	Request *pmReq   `json:"request,omitempty"` // leaf request
 }
 
 type pmReq struct {

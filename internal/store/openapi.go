@@ -145,7 +145,7 @@ func buildOpenAPIRequest(method, path, baseURL string, op map[string]interface{}
 		Body:   Body{Mode: "raw"},
 	}
 
-	// Name: summary → operationId → "METHOD /path"
+	// Name: summary -> operationId -> "METHOD /path"
 	switch {
 	case strVal(op["summary"]) != "":
 		req.Name = strVal(op["summary"])

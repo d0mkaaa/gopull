@@ -11,7 +11,7 @@ import (
 	"github.com/d0mkaaa/gopull/internal/tui"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	ver := flag.Bool("version", false, "print version and exit")

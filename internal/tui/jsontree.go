@@ -18,12 +18,12 @@ const (
 )
 
 type jsonNode struct {
-	key      string
-	arrayIdx int // >= 0 for array elements, -1 otherwise
-	valStr   string
-	kind     nodeKind
-	children []*jsonNode
-	parent   *jsonNode
+	key       string
+	arrayIdx  int // >= 0 for array elements, -1 otherwise
+	valStr    string
+	kind      nodeKind
+	children  []*jsonNode
+	parent    *jsonNode
 	collapsed bool
 }
 
@@ -208,7 +208,7 @@ func jsonNodeDepth(n *jsonNode) int {
 
 func (s *jsonTreeState) render(width int) string {
 	accentSt := lipgloss.NewStyle().Foreground(colorAccent)
-	mutedSt  := lipgloss.NewStyle().Foreground(colorMuted)
+	mutedSt := lipgloss.NewStyle().Foreground(colorMuted)
 	cursorSt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 
 	var sb strings.Builder
@@ -256,10 +256,10 @@ func (s *jsonTreeState) render(width int) string {
 }
 
 func colorJSONValue(v string) string {
-	mutedSt   := lipgloss.NewStyle().Foreground(colorMuted)
+	mutedSt := lipgloss.NewStyle().Foreground(colorMuted)
 	successSt := lipgloss.NewStyle().Foreground(colorSuccess)
-	warnSt    := lipgloss.NewStyle().Foreground(colorWarn)
-	subtleSt  := lipgloss.NewStyle().Foreground(colorSubtle)
+	warnSt := lipgloss.NewStyle().Foreground(colorWarn)
+	subtleSt := lipgloss.NewStyle().Foreground(colorSubtle)
 
 	switch {
 	case v == "null":

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type AssertResult struct {
@@ -24,11 +25,14 @@ type RunResult struct {
 //
 //	assert status == 200
 //	assert status != 404
+//	assert header Content-Type == application/json
 //	assert body contains "token"
 //	assert body !contains "error"
+//	assert jsonpath $.data.id > 0
+//	assert response_time < 500
 //	set TOKEN = $.data.access_token
 //	set ID    = $.id
-func Run(script string, statusCode int, body []byte) RunResult {
+func Run(script string, statusCode int, body []byte, rawHeaders string, elapsed time.Duration) RunResult {
 	result := RunResult{EnvUpdates: make(map[string]string)}
 	for _, raw := range strings.Split(script, "\n") {
 		line := strings.TrimSpace(raw)
@@ -37,7 +41,7 @@ func Run(script string, statusCode int, body []byte) RunResult {
 		}
 		switch {
 		case strings.HasPrefix(line, "assert "):
-			ar := evalAssert(strings.TrimPrefix(line, "assert "), statusCode, body)
+			ar := evalAssert(strings.TrimPrefix(line, "assert "), statusCode, body, rawHeaders, elapsed)
 			result.Assertions = append(result.Assertions, ar)
 		case strings.HasPrefix(line, "set "):
 			k, v := evalSet(strings.TrimPrefix(line, "set "), body)
@@ -49,8 +53,22 @@ func Run(script string, statusCode int, body []byte) RunResult {
 	return result
 }
 
-func evalAssert(expr string, status int, body []byte) AssertResult {
+func evalAssert(expr string, status int, body []byte, rawHeaders string, elapsed time.Duration) AssertResult {
 	label := "assert " + expr
+
+	// assert header <name> <op> <value>
+	if strings.HasPrefix(expr, "header ") {
+		return evalAssertHeader(label, strings.TrimPrefix(expr, "header "), rawHeaders)
+	}
+	// assert jsonpath <path> <op> <value>
+	if strings.HasPrefix(expr, "jsonpath ") {
+		return evalAssertJSONPath(label, strings.TrimPrefix(expr, "jsonpath "), body)
+	}
+	// assert response_time <op> <ms>
+	if strings.HasPrefix(expr, "response_time ") {
+		return evalAssertResponseTime(label, strings.TrimPrefix(expr, "response_time "), elapsed)
+	}
+
 	parts := strings.SplitN(expr, " ", 3)
 	if len(parts) < 3 {
 		return AssertResult{Label: label, Pass: false, Actual: "parse error"}
@@ -74,6 +92,65 @@ func evalAssert(expr string, status int, body []byte) AssertResult {
 	return AssertResult{Label: label, Pass: false, Actual: "unknown subject"}
 }
 
+func evalAssertHeader(label, expr, rawHeaders string) AssertResult {
+	// expr: "<Header-Name> <op> <value>"
+	parts := strings.SplitN(expr, " ", 3)
+	if len(parts) < 3 {
+		return AssertResult{Label: label, Pass: false, Actual: "parse error"}
+	}
+	headerName := parts[0]
+	op := parts[1]
+	expected := strings.Trim(parts[2], `"'`)
+
+	// Scan rawHeaders for the header value.
+	actual := ""
+	for _, line := range strings.Split(rawHeaders, "\n") {
+		if idx := strings.Index(line, ":"); idx > 0 {
+			k := strings.TrimSpace(line[:idx])
+			v := strings.TrimSpace(line[idx+1:])
+			if strings.EqualFold(k, headerName) {
+				actual = v
+				break
+			}
+		}
+	}
+	return AssertResult{Label: label, Pass: cmp(actual, op, expected), Actual: actual}
+}
+
+func evalAssertJSONPath(label, expr string, body []byte) AssertResult {
+	// expr: "<jsonpath> <op> <value>"
+	parts := strings.SplitN(expr, " ", 3)
+	if len(parts) < 3 {
+		return AssertResult{Label: label, Pass: false, Actual: "parse error"}
+	}
+	path := parts[0]
+	op := parts[1]
+	expected := strings.Trim(parts[2], `"'`)
+
+	var data interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return AssertResult{Label: label, Pass: false, Actual: "invalid JSON"}
+	}
+	val, ok := extractPath(data, path)
+	if !ok {
+		return AssertResult{Label: label, Pass: false, Actual: "path not found"}
+	}
+	actual := fmt.Sprintf("%v", val)
+	return AssertResult{Label: label, Pass: cmp(actual, op, expected), Actual: actual}
+}
+
+func evalAssertResponseTime(label, expr string, elapsed time.Duration) AssertResult {
+	// expr: "<op> <ms>"
+	parts := strings.SplitN(expr, " ", 2)
+	if len(parts) < 2 {
+		return AssertResult{Label: label, Pass: false, Actual: "parse error"}
+	}
+	op := parts[0]
+	expected := strings.TrimSpace(parts[1])
+	actualMs := strconv.FormatInt(elapsed.Milliseconds(), 10)
+	return AssertResult{Label: label, Pass: cmp(actualMs, op, expected), Actual: actualMs + "ms"}
+}
+
 func cmp(actual, op, expected string) bool {
 	switch op {
 	case "==":
@@ -92,6 +169,16 @@ func cmp(actual, op, expected string) bool {
 		a, err1 := strconv.ParseFloat(actual, 64)
 		e, err2 := strconv.ParseFloat(expected, 64)
 		return err1 == nil && err2 == nil && a < e
+	case ">=":
+		a, err1 := strconv.ParseFloat(actual, 64)
+		e, err2 := strconv.ParseFloat(expected, 64)
+		return err1 == nil && err2 == nil && a >= e
+	case "<=":
+		a, err1 := strconv.ParseFloat(actual, 64)
+		e, err2 := strconv.ParseFloat(expected, 64)
+		return err1 == nil && err2 == nil && a <= e
+	case "matches":
+		return strings.Contains(actual, expected)
 	}
 	return false
 }

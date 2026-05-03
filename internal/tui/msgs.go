@@ -11,9 +11,9 @@ import (
 	"github.com/d0mkaaa/gopull/internal/store"
 )
 
-type focusEditorMsg   struct{}
+type focusEditorMsg struct{}
 type focusResponseMsg struct{}
-type focusSidebarMsg  struct{}
+type focusSidebarMsg struct{}
 
 type loadRequestMsg struct {
 	req    *store.Request
@@ -34,7 +34,7 @@ type responseMsg struct {
 }
 
 type historyWrittenMsg struct{}
-type clearStatusMsg    struct{}
+type clearStatusMsg struct{}
 
 type errMsg struct{ err error }
 
@@ -101,6 +101,23 @@ type historyLoadedMsg struct {
 	currentBody string
 }
 
+type historyBrowserLoadedMsg struct {
+	entries []store.HistoryEntry
+	err     error
+}
+
+type historyActionMsg struct {
+	action string
+	entry  store.HistoryEntry
+}
+
+type environmentsUpdatedMsg struct {
+	envs        []*store.Environment
+	activeEnvID string
+	status      string
+	err         error
+}
+
 type paletteExecMsg struct {
 	action string
 	req    *store.Request
@@ -129,9 +146,30 @@ type externalEditorDoneMsg struct {
 
 type curlCopiedMsg struct{}
 
+type renameCollectionMsg struct {
+	collID string
+	name   string
+}
+
+type renameRequestMsg struct {
+	collID string
+	reqID  string
+	name   string
+}
+
+type duplicateRequestMsg struct {
+	collID string
+	reqID  string
+}
+
+type moveRequestMsg struct {
+	collID string
+	reqID  string
+	delta  int
+}
+
 type customThemeSavedMsg struct {
 	themeID string
 	theme   Theme
 	err     error
 }
-

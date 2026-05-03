@@ -6,11 +6,12 @@
 // executable again with --hook <name>, passing a JSON payload on
 // stdin and reading a JSON result from stdout.
 //
-// Hook names: pre_request, post_response
+// Hook names: pre_request, post_response.  v1 manifests must declare
+// permissions for env/secret access and request/env mutation.
 //
-// Example manifest (stdout of `plugin --manifest`):
+// Example v1 manifest (stdout of `plugin --manifest`):
 //
-//	{"name":"aws-sig","version":"1.0.0","hooks":["pre_request"]}
+//	{"name":"aws-sig","version":"1.0.0","api_version":"v1","hooks":["pre_request"],"permissions":["read_env","read_body","read_secrets","write_headers"]}
 //
 // Example pre_request stdin:
 //
@@ -45,11 +46,23 @@ const (
 	hookTimeout     = 5 * time.Second
 )
 
+const (
+	PermissionReadEnv      = "read_env"
+	PermissionReadBody     = "read_body"
+	PermissionReadSecrets  = "read_secrets"
+	PermissionWriteBody    = "write_body"
+	PermissionWriteEnv     = "write_env"
+	PermissionWriteHeaders = "write_headers"
+	PermissionWriteRequest = "write_request"
+)
+
 // Manifest is returned by a plugin when called with --manifest.
 type Manifest struct {
-	Name    string   `json:"name"`
-	Version string   `json:"version"`
-	Hooks   []string `json:"hooks"`
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	APIVersion  string   `json:"api_version,omitempty"`
+	Hooks       []string `json:"hooks"`
+	Permissions []string `json:"permissions,omitempty"`
 }
 
 // RespSnapshot is the response data passed to post_response hooks.
@@ -84,6 +97,11 @@ type postResponsePayload struct {
 
 type postResponseResult struct {
 	EnvUpdates map[string]string `json:"env_updates,omitempty"`
+}
+
+type HookContext struct {
+	Env        map[string]string
+	SecretKeys map[string]bool
 }
 
 type pluginEntry struct {
@@ -137,20 +155,13 @@ func (r *Runner) Names() []string {
 // RunPreRequest calls every plugin that registered the pre_request hook,
 // sequentially, and merges their modifications into req.  Logs collect
 // any stderr or error output for display in the UI.
-func (r *Runner) RunPreRequest(req store.Request, env map[string]string) (store.Request, []string) {
-	payload := preRequestPayload{
-		Method:  req.Method,
-		URL:     req.URL,
-		Headers: req.Headers,
-		Body:    req.Body,
-		Auth:    req.Auth,
-		Env:     env,
-	}
+func (r *Runner) RunPreRequest(req store.Request, ctx HookContext) (store.Request, []string) {
 	var logs []string
 	for _, p := range r.plugins {
 		if !hasHook(p.manifest, "pre_request") {
 			continue
 		}
+		payload := buildPreRequestPayload(req, p.manifest, ctx)
 		out, stderr, err := callPlugin(p.path, "pre_request", payload)
 		if stderr != "" {
 			logs = append(logs, fmt.Sprintf("[%s] %s", p.manifest.Name, stderr))
@@ -164,46 +175,34 @@ func (r *Runner) RunPreRequest(req store.Request, env map[string]string) (store.
 			logs = append(logs, fmt.Sprintf("[%s] bad output: %v", p.manifest.Name, err))
 			continue
 		}
-		if res.Method != "" {
+		if res.Method != "" && canWriteRequest(p.manifest) {
 			req.Method = res.Method
 		}
-		if res.URL != "" {
+		if res.URL != "" && canWriteRequest(p.manifest) {
 			req.URL = res.URL
 		}
-		if res.Headers != nil {
+		if res.Headers != nil && canWriteHeaders(p.manifest) {
 			req.Headers = res.Headers
 		}
-		if res.Body != nil {
+		if res.Body != nil && canWriteBody(p.manifest) {
 			req.Body = *res.Body
 		}
-		// update payload for the next plugin in the chain
-		payload.Method = req.Method
-		payload.URL = req.URL
-		payload.Headers = req.Headers
-		payload.Body = req.Body
 	}
 	return req, logs
 }
 
 // RunPostResponse calls every plugin that registered the post_response hook
 // and merges any env_updates they return.
-func (r *Runner) RunPostResponse(req store.Request, resp RespSnapshot, env map[string]string) (map[string]string, []string) {
-	payload := postResponsePayload{
-		Request: preRequestPayload{
-			Method:  req.Method,
-			URL:     req.URL,
-			Headers: req.Headers,
-			Body:    req.Body,
-			Auth:    req.Auth,
-			Env:     env,
-		},
-		Response: resp,
-	}
+func (r *Runner) RunPostResponse(req store.Request, resp RespSnapshot, ctx HookContext) (map[string]string, []string) {
 	updates := map[string]string{}
 	var logs []string
 	for _, p := range r.plugins {
 		if !hasHook(p.manifest, "post_response") {
 			continue
+		}
+		payload := postResponsePayload{
+			Request:  buildPreRequestPayload(req, p.manifest, ctx),
+			Response: resp,
 		}
 		out, stderr, err := callPlugin(p.path, "post_response", payload)
 		if stderr != "" {
@@ -218,14 +217,85 @@ func (r *Runner) RunPostResponse(req store.Request, resp RespSnapshot, env map[s
 			logs = append(logs, fmt.Sprintf("[%s] bad output: %v", p.manifest.Name, err))
 			continue
 		}
-		for k, v := range res.EnvUpdates {
-			updates[k] = v
+		if canWriteEnv(p.manifest) {
+			for k, v := range res.EnvUpdates {
+				updates[k] = v
+			}
 		}
 	}
 	if len(updates) == 0 {
 		return nil, logs
 	}
 	return updates, logs
+}
+
+func buildPreRequestPayload(req store.Request, m Manifest, ctx HookContext) preRequestPayload {
+	env := pluginEnv(m, ctx)
+	auth := req.Auth
+	if !canReadSecrets(m) {
+		auth.Token = ""
+		auth.Pass = ""
+	}
+	body := req.Body
+	if !canReadBody(m) {
+		body.Raw = ""
+	}
+	return preRequestPayload{
+		Method:  req.Method,
+		URL:     req.URL,
+		Headers: req.Headers,
+		Body:    body,
+		Auth:    auth,
+		Env:     env,
+	}
+}
+
+func pluginEnv(m Manifest, ctx HookContext) map[string]string {
+	if len(ctx.Env) == 0 || !canReadEnv(m) {
+		return nil
+	}
+	env := make(map[string]string, len(ctx.Env))
+	for k, v := range ctx.Env {
+		if ctx.SecretKeys[k] && !canReadSecrets(m) {
+			continue
+		}
+		env[k] = v
+	}
+	return env
+}
+
+func canReadSecrets(m Manifest) bool {
+	if m.APIVersion == "" {
+		return true
+	}
+	return hasPermission(m, PermissionReadSecrets)
+}
+
+func canReadEnv(m Manifest) bool {
+	if m.APIVersion == "" {
+		return true
+	}
+	return hasPermission(m, PermissionReadEnv) || hasPermission(m, PermissionReadSecrets)
+}
+
+func canReadBody(m Manifest) bool {
+	return m.APIVersion == "" || hasPermission(m, PermissionReadBody)
+}
+
+func canWriteBody(m Manifest) bool {
+	return m.APIVersion == "" || hasPermission(m, PermissionWriteBody)
+}
+
+func canWriteHeaders(m Manifest) bool {
+	return m.APIVersion == "" || hasPermission(m, PermissionWriteHeaders)
+}
+
+func canWriteEnv(m Manifest) bool {
+	return m.APIVersion == "" || hasPermission(m, PermissionWriteEnv)
+}
+
+func canWriteRequest(m Manifest) bool {
+	return m.APIVersion == "" || hasPermission(m, PermissionWriteRequest)
 }
 
 func fetchManifest(path string) (Manifest, error) {
@@ -260,6 +330,15 @@ func callPlugin(path, hook string, payload any) ([]byte, string, error) {
 func hasHook(m Manifest, hook string) bool {
 	for _, h := range m.Hooks {
 		if h == hook {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPermission(m Manifest, permission string) bool {
+	for _, p := range m.Permissions {
+		if p == permission {
 			return true
 		}
 	}

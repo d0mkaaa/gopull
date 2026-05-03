@@ -39,8 +39,8 @@ go build -o gopull .
 ## Features
 
 - **Collections** - save and organise requests, run them in sequence with pass/fail reporting
-- **Environments** - named variable sets with `{{VAR}}` substitution in URLs, headers, and body
-- **History** - last 500 requests, diffable against the current response
+- **Environments** - create, edit, select, and delete named variable sets with `{{VAR}}` substitution
+- **History** - browse the last 500 requests, replay them, save them, or diff responses
 - **Streaming** - SSE responses arrive live line by line
 - **Themes** - dark, light, nord, gruvbox - or create your own in JSON
 - **Curl import** - paste a curl command into the URL field and press tab
@@ -65,7 +65,7 @@ Three panels: sidebar (collections), editor (request builder), response. `tab` /
 
 `[` and `]` cycle tabs: body, headers, auth, tests, opts.
 
-- Method: `space` / `↑↓` cycle standard methods; press any letter to type a custom one
+- Method: `space` / `up` / `down` cycle standard methods; press any letter to type a custom one
 - Headers: `Key: Value`, one per line. Prefix with `#` to disable a header
 - Body: raw by default, `alt+m` toggles form / GraphQL mode
 - Auth: bearer token or basic auth under the auth tab
@@ -75,11 +75,25 @@ Three panels: sidebar (collections), editor (request builder), response. `tab` /
 
 `ctrl+s` saves the current request. Auto-names from method + URL path if no name is set.
 
-From the sidebar: `↑↓` navigate, `enter` open, `r` run all requests in sequence, `d` twice to delete.
+From the sidebar: `up` / `down` navigate, `enter` open, `r` run all requests in sequence, `n` rename, `ctrl+d` duplicate a request, `ctrl+j` / `ctrl+k` move a request, `d` twice to delete.
 
 ### Environments
 
-`ctrl+e` opens the picker. `{{VAR_NAME}}` in any field gets substituted at send time.
+`ctrl+e` opens the environment manager. `enter` selects, `n` creates, `e` edits, and `d` deletes.
+
+Variables use a compact line format:
+
+```text
+BASE_URL=https://api.example.com
+secret TOKEN=value
+# DISABLED=value
+```
+
+`secret` values are masked in the picker. If an environment has a dotenv path, file variables load first and inline variables override them.
+
+### History
+
+`alt+h` opens the history browser. Filter by typing, `enter` loads a request into the editor, `ctrl+r` replays it, `s` saves it to the active collection, and `D` diffs its response body against another history entry.
 
 ### Response
 
@@ -91,9 +105,12 @@ In tree view: `space` collapse/expand, `c` collapse all, `e` expand all, `{`/`}`
 
 Write assertions in the Tests tab:
 
-```
+```text
 assert status == 200
+assert header Content-Type contains json
 assert body contains "token"
+assert jsonpath $.data.id > 0
+assert response_time < 500
 set TOKEN = $.data.access_token
 ```
 
@@ -123,7 +140,8 @@ set TOKEN = $.data.access_token
 | `alt+p` | Command palette |
 | `alt+b` | Toggle sidebar |
 | `alt+o` | Settings |
-| `ctrl+e` | Environment picker |
+| `ctrl+e` | Environment manager |
+| `alt+h` | History browser |
 | `ctrl+i` | Import collection |
 | `ctrl+x` | Export collection (Postman JSON) |
 | `alt+j` | Format JSON body |
@@ -145,7 +163,7 @@ Custom bindings go in `~/.config/gopull/keybindings.json`.
 
 ## Config
 
-```
+```text
 ~/.config/gopull/
   collections/        one JSON file per collection
   environments/       named variable sets
@@ -153,6 +171,7 @@ Custom bindings go in `~/.config/gopull/keybindings.json`.
   config.json         theme, timeout, max display bytes
   keybindings.json    key overrides
   themes/             custom theme files
+  plugins/            experimental local hooks
 ```
 
 `config.json` options:
@@ -172,6 +191,36 @@ Custom bindings go in `~/.config/gopull/keybindings.json`.
 Built-in: `dark` (catppuccin mocha), `light` (catppuccin latte), `nord`, `gruvbox`. Switch in settings (`alt+o`), previews live.
 
 Drop a JSON file in `~/.config/gopull/themes/` to add your own - a starter template is written there on first run.
+
+## Experimental Hooks
+
+Executables in `~/.config/gopull/plugins/` can register local `pre_request` and `post_response` hooks. Hooks are local executables that speak JSON over stdin/stdout; there is no marketplace, remote install, account, or sync layer.
+
+Plugins return a manifest from `--manifest`:
+
+```json
+{
+  "name": "aws-sigv4",
+  "version": "0.1.0",
+  "api_version": "v1",
+  "hooks": ["pre_request"],
+  "permissions": ["read_env", "read_body", "read_secrets", "write_headers"]
+}
+```
+
+`pre_request` hooks receive request JSON and may return changed fields. `post_response` hooks receive the request plus a response snapshot and may return env updates.
+
+v1 permissions:
+
+- `read_env` - receive non-secret environment variables
+- `read_body` - receive the request body
+- `read_secrets` - receive secret environment variables and auth secrets
+- `write_request` - change method or URL
+- `write_headers` - replace request headers
+- `write_body` - replace the request body
+- `write_env` - write environment variables from `post_response`
+
+Manifests without `api_version` run in legacy mode for compatibility. New plugins should use `api_version: "v1"` and declare the narrowest permissions they need.
 
 ---
 

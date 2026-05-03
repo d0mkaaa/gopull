@@ -113,6 +113,86 @@ func (s *Store) EnsureDefaultCollection() (*Collection, error) {
 	return c, s.SaveCollection(c)
 }
 
+func (s *Store) RenameCollection(collID, name string) error {
+	path := filepath.Join(s.dir, "collections", collID+".json")
+	c, err := s.loadCollection(path)
+	if err != nil {
+		return fmt.Errorf("load collection: %w", err)
+	}
+	c.Name = name
+	return s.SaveCollection(c)
+}
+
+func (s *Store) RenameRequest(collID, reqID, name string) error {
+	path := filepath.Join(s.dir, "collections", collID+".json")
+	c, err := s.loadCollection(path)
+	if err != nil {
+		return fmt.Errorf("load collection: %w", err)
+	}
+	r, ok := c.Requests[reqID]
+	if !ok {
+		return fmt.Errorf("request not found")
+	}
+	r.Name = name
+	return s.SaveCollection(c)
+}
+
+func (s *Store) DuplicateRequest(collID, reqID string) (*Request, error) {
+	path := filepath.Join(s.dir, "collections", collID+".json")
+	c, err := s.loadCollection(path)
+	if err != nil {
+		return nil, fmt.Errorf("load collection: %w", err)
+	}
+	orig, ok := c.Requests[reqID]
+	if !ok {
+		return nil, fmt.Errorf("request not found")
+	}
+	data, err := json.Marshal(orig)
+	if err != nil {
+		return nil, err
+	}
+	var dup Request
+	if err := json.Unmarshal(data, &dup); err != nil {
+		return nil, err
+	}
+	dup.ID = newID()
+	dup.Name = dup.Name + " (copy)"
+	c.Requests[dup.ID] = &dup
+	newOrder := make([]string, 0, len(c.Order)+1)
+	for _, id := range c.Order {
+		newOrder = append(newOrder, id)
+		if id == reqID {
+			newOrder = append(newOrder, dup.ID)
+		}
+	}
+	c.Order = newOrder
+	return &dup, s.SaveCollection(c)
+}
+
+func (s *Store) MoveRequest(collID, reqID string, delta int) error {
+	path := filepath.Join(s.dir, "collections", collID+".json")
+	c, err := s.loadCollection(path)
+	if err != nil {
+		return fmt.Errorf("load collection: %w", err)
+	}
+	idx := -1
+	for i, id := range c.Order {
+		if id == reqID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+	newIdx := idx + delta
+	if newIdx < 0 || newIdx >= len(c.Order) {
+		return nil
+	}
+	c.Order[idx], c.Order[newIdx] = c.Order[newIdx], c.Order[idx]
+	return s.SaveCollection(c)
+}
+
 func (s *Store) DeleteRequest(collectionID, requestID string) error {
 	path := filepath.Join(s.dir, "collections", collectionID+".json")
 	c, err := s.loadCollection(path)
@@ -191,6 +271,14 @@ func (s *Store) SaveEnvironment(e *Environment) error {
 		return fmt.Errorf("marshal environment: %w", err)
 	}
 	return writeAtomic(path, data)
+}
+
+func (s *Store) DeleteEnvironment(envID string) error {
+	path := filepath.Join(s.dir, "environments", envID+".json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete environment: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) AppendHistory(entry HistoryEntry) error {

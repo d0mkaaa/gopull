@@ -25,7 +25,7 @@ func viewWelcome(step, w, h int) string {
 
 	var hint string
 	if step < welcomeSteps-1 {
-		hint = lipgloss.NewStyle().Foreground(colorAccent).Faint(true).Render("press any key to continue  →")
+		hint = lipgloss.NewStyle().Foreground(colorAccent).Faint(true).Render("press any key to continue  ->")
 	} else {
 		hint = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render("press any key to start")
 	}
@@ -33,7 +33,7 @@ func viewWelcome(step, w, h int) string {
 	body := content + "\n\n" + hint
 
 	box := paneActive.
-		Width(w - 20).
+		Width(w-20).
 		Padding(2, 4).
 		Render(body)
 

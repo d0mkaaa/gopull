@@ -197,9 +197,9 @@ func TestLexerForContentType(t *testing.T) {
 		{"application/yaml", false},
 		{"text/yaml", false},
 		{"application/toml", false},
-		{"text/plain", true},  // plain text: let auto-detect decide
-		{"", true},             // empty: let auto-detect decide
-		{"image/png", true},   // unknown binary: no lexer
+		{"text/plain", true}, // plain text: let auto-detect decide
+		{"", true},           // empty: let auto-detect decide
+		{"image/png", true},  // unknown binary: no lexer
 		{"audio/mpeg", true},
 	}
 	for _, tc := range cases {

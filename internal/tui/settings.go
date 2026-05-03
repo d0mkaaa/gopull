@@ -16,7 +16,7 @@ import (
 type settingsFocus int
 
 const (
-	sfThemes     settingsFocus = iota
+	sfThemes settingsFocus = iota
 	sfTimeout
 	sfThemeEditor
 )
@@ -102,8 +102,8 @@ func (e themeEditorModel) Update(msg tea.Msg) (themeEditorModel, tea.Cmd) {
 
 func (e themeEditorModel) View(width int) string {
 	accent := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	sub    := lipgloss.NewStyle().Foreground(colorSubtle)
-	muted  := lipgloss.NewStyle().Foreground(colorMuted)
+	sub := lipgloss.NewStyle().Foreground(colorSubtle)
+	muted := lipgloss.NewStyle().Foreground(colorMuted)
 
 	var sb strings.Builder
 	sb.WriteString(sidebarTitle.Render("new theme"))
@@ -322,8 +322,8 @@ func (m SettingsModel) View() string {
 	}
 
 	accent := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	muted  := lipgloss.NewStyle().Foreground(colorMuted)
-	sub    := lipgloss.NewStyle().Foreground(colorSubtle)
+	muted := lipgloss.NewStyle().Foreground(colorMuted)
+	sub := lipgloss.NewStyle().Foreground(colorSubtle)
 
 	sectionLabel := func(label string, active bool) string {
 		if active {
@@ -343,11 +343,11 @@ func (m SettingsModel) View() string {
 
 	for i, t := range m.themes {
 		if i == m.themeIdx {
-			bullet := accent.Render("  ● " + t.label)
-			desc   := muted.Render("   " + t.desc)
+			bullet := accent.Render("  * " + t.label)
+			desc := muted.Render("   " + t.desc)
 			sb.WriteString(bullet + desc + "\n")
 		} else {
-			sb.WriteString(muted.Render("    " + t.label) + "\n")
+			sb.WriteString(muted.Render("    "+t.label) + "\n")
 		}
 	}
 
@@ -361,9 +361,9 @@ func (m SettingsModel) View() string {
 
 	var hintStr string
 	if m.focus == sfThemes {
-		hintStr = "↑↓ pick   n new theme   tab → timeout   esc close"
+		hintStr = "up/down pick   n new theme   tab -> timeout   esc close"
 	} else {
-		hintStr = "tab → theme   esc close"
+		hintStr = "tab -> theme   esc close"
 	}
 	sb.WriteString(hint.Render(hintStr))
 

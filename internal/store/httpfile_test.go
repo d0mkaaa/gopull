@@ -99,7 +99,7 @@ Accept: application/json
 }
 
 func TestImportHTTPFile_DefaultNameFromPath(t *testing.T) {
-	// No name on ### line → default name from method + path.
+	// No name on ### line -> default name from method + path.
 	input := `###
 GET https://api.example.com/users/42
 `
