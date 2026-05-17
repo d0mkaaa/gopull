@@ -33,9 +33,11 @@ var staticActions = []paletteItem{
 	{label: "Settings", detail: "alt+o", action: "settings"},
 	{label: "Environment Picker", detail: "ctrl+e", action: "env"},
 	{label: "History Browser", detail: "alt+h", action: "history"},
+	{label: "Plugin Manager", detail: "alt+l", action: "plugins"},
 	{label: "Import Collection", detail: "ctrl+i  (.json or .http)", action: "import"},
 	{label: "Export Collection", detail: "ctrl+x  Postman JSON", action: "export"},
 	{label: "Export as .http", detail: "VS Code REST Client format", action: "export_http"},
+	{label: "Export as gopull files", detail: "plain text directory", action: "export_plain"},
 	{label: "Copy Request as curl", detail: "alt+c", action: "curl_export"},
 	{label: "Open Body in Editor", detail: "alt+e", action: "external_editor"},
 	{label: "Quit", detail: "alt+q", action: "quit"},
@@ -140,17 +142,19 @@ func (m PaletteModel) View() string {
 	title := sidebarTitle.Render("command palette")
 
 	rows := make([]string, len(m.filtered))
+	rowWidth := 70
+	labelWidth := 28
 	for i, item := range m.filtered {
 		sel := "  "
-		label := item.label
-		detail := item.detail
+		label := clipText(item.label, labelWidth)
+		detail := clipText(item.detail, max(12, rowWidth-labelWidth-6))
 		if i == m.idx {
 			sel = tabActive.Render(">") + " "
 			label = lipgloss.NewStyle().Foreground(colorAccent).Render(label)
 		} else {
 			sel += " "
 		}
-		rows[i] = sel + label + "  " + hint.Render(detail)
+		rows[i] = fillLine(sel+label, labelWidth+4) + hint.Render(detail)
 	}
 
 	list := strings.Join(rows, "\n")

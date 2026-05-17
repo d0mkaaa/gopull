@@ -17,7 +17,10 @@ type Request struct {
 	Name    string         `json:"name"`
 	Method  string         `json:"method"`
 	URL     string         `json:"url"`
+	Tags    []string       `json:"tags,omitempty"`
 	Headers []Header       `json:"headers"`
+	Query   []Param        `json:"query,omitempty"`
+	Path    []Param        `json:"path,omitempty"`
 	Body    Body           `json:"body"`
 	Auth    Auth           `json:"auth"`
 	Tests   string         `json:"tests,omitempty"`
@@ -29,6 +32,10 @@ type RequestOptions struct {
 	DisableRedirects bool   `json:"disable_redirects,omitempty"`
 	ProxyURL         string `json:"proxy_url,omitempty"`
 	TimeoutSecs      int    `json:"timeout_secs,omitempty"`
+	UseCookieJar     bool   `json:"use_cookie_jar,omitempty"`
+	CABundlePath     string `json:"ca_bundle_path,omitempty"`
+	ClientCertPath   string `json:"client_cert_path,omitempty"`
+	ClientKeyPath    string `json:"client_key_path,omitempty"`
 }
 
 type Header struct {
@@ -37,8 +44,14 @@ type Header struct {
 	Enabled bool   `json:"enabled"`
 }
 
+type Param struct {
+	Key     string `json:"key"`
+	Value   string `json:"value"`
+	Enabled bool   `json:"enabled"`
+}
+
 type Body struct {
-	Mode string `json:"mode"` // raw, form
+	Mode string `json:"mode"` // raw, form, graphql, multipart, file
 	Raw  string `json:"raw"`
 }
 
@@ -87,6 +100,8 @@ type HistReq struct {
 	Method   string            `json:"method"`
 	URL      string            `json:"url"`
 	Headers  map[string]string `json:"headers"`
+	Query    []Param           `json:"query,omitempty"`
+	Path     []Param           `json:"path,omitempty"`
 	Body     string            `json:"body"`
 	BodyMode string            `json:"body_mode,omitempty"`
 	Auth     Auth              `json:"auth,omitempty"`

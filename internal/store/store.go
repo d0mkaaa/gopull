@@ -407,6 +407,29 @@ func (s *Store) LoadKeybindings() (map[string]string, error) {
 	return kb, json.Unmarshal(data, &kb)
 }
 
+func (s *Store) LoadDisabledPlugins() (map[string]bool, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir, "plugins", "disabled.json"))
+	if os.IsNotExist(err) {
+		return map[string]bool{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var disabled map[string]bool
+	if err := json.Unmarshal(data, &disabled); err != nil {
+		return map[string]bool{}, nil
+	}
+	return disabled, nil
+}
+
+func (s *Store) SaveDisabledPlugins(disabled map[string]bool) error {
+	data, err := json.MarshalIndent(disabled, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(s.dir, "plugins", "disabled.json"), data)
+}
+
 func newID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {

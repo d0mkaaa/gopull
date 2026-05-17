@@ -29,8 +29,8 @@ func newDiff(currentBody string, entries []store.HistoryEntry) DiffModel {
 }
 
 func (m DiffModel) SetSize(w, h int) DiffModel {
-	m.viewport.Width = w - 4
-	m.viewport.Height = max(3, h-6)
+	m.viewport.Width = max(1, w)
+	m.viewport.Height = max(3, h-5)
 	return m
 }
 

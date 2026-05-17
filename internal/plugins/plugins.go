@@ -107,18 +107,34 @@ type HookContext struct {
 type pluginEntry struct {
 	path     string
 	manifest Manifest
+	enabled  bool
 }
 
 // Runner holds the loaded set of plugins for a session.
 type Runner struct {
-	plugins []pluginEntry
+	plugins  []pluginEntry
+	disabled map[string]bool
+}
+
+type Info struct {
+	Name        string
+	Version     string
+	APIVersion  string
+	Hooks       []string
+	Permissions []string
+	Path        string
+	Enabled     bool
 }
 
 // Load scans pluginsDir for executables, calls --manifest on each, and
 // returns a Runner ready to fire hooks.  Plugins that fail to respond
 // to --manifest are silently skipped.
 func Load(pluginsDir string) *Runner {
-	r := &Runner{}
+	return LoadWithDisabled(pluginsDir, nil)
+}
+
+func LoadWithDisabled(pluginsDir string, disabled map[string]bool) *Runner {
+	r := &Runner{disabled: disabled}
 	entries, err := os.ReadDir(pluginsDir)
 	if err != nil {
 		return r
@@ -135,19 +151,46 @@ func Load(pluginsDir string) *Runner {
 		if err != nil {
 			continue
 		}
-		r.plugins = append(r.plugins, pluginEntry{path: path, manifest: m})
+		r.plugins = append(r.plugins, pluginEntry{path: path, manifest: m, enabled: !disabledPlugin(disabled, path, m.Name)})
 	}
 	return r
 }
 
 // Count returns the number of loaded plugins.
-func (r *Runner) Count() int { return len(r.plugins) }
+func (r *Runner) Count() int {
+	n := 0
+	for _, p := range r.plugins {
+		if p.enabled {
+			n++
+		}
+	}
+	return n
+}
 
 // Names returns the display names of all loaded plugins.
 func (r *Runner) Names() []string {
-	out := make([]string, len(r.plugins))
+	var out []string
+	for _, p := range r.plugins {
+		if !p.enabled {
+			continue
+		}
+		out = append(out, p.manifest.Name)
+	}
+	return out
+}
+
+func (r *Runner) Infos() []Info {
+	out := make([]Info, len(r.plugins))
 	for i, p := range r.plugins {
-		out[i] = p.manifest.Name
+		out[i] = Info{
+			Name:        p.manifest.Name,
+			Version:     p.manifest.Version,
+			APIVersion:  p.manifest.APIVersion,
+			Hooks:       append([]string(nil), p.manifest.Hooks...),
+			Permissions: append([]string(nil), p.manifest.Permissions...),
+			Path:        p.path,
+			Enabled:     p.enabled,
+		}
 	}
 	return out
 }
@@ -158,7 +201,7 @@ func (r *Runner) Names() []string {
 func (r *Runner) RunPreRequest(req store.Request, ctx HookContext) (store.Request, []string) {
 	var logs []string
 	for _, p := range r.plugins {
-		if !hasHook(p.manifest, "pre_request") {
+		if !p.enabled || !hasHook(p.manifest, "pre_request") {
 			continue
 		}
 		payload := buildPreRequestPayload(req, p.manifest, ctx)
@@ -197,7 +240,7 @@ func (r *Runner) RunPostResponse(req store.Request, resp RespSnapshot, ctx HookC
 	updates := map[string]string{}
 	var logs []string
 	for _, p := range r.plugins {
-		if !hasHook(p.manifest, "post_response") {
+		if !p.enabled || !hasHook(p.manifest, "post_response") {
 			continue
 		}
 		payload := postResponsePayload{
@@ -227,6 +270,13 @@ func (r *Runner) RunPostResponse(req store.Request, resp RespSnapshot, ctx HookC
 		return nil, logs
 	}
 	return updates, logs
+}
+
+func disabledPlugin(disabled map[string]bool, path, name string) bool {
+	if len(disabled) == 0 {
+		return false
+	}
+	return disabled[path] || disabled[filepath.Base(path)] || disabled[name]
 }
 
 func buildPreRequestPayload(req store.Request, m Manifest, ctx HookContext) preRequestPayload {

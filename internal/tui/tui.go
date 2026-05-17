@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
@@ -95,6 +96,10 @@ type Model struct {
 	store           *store.Store
 	configDir       string // ~/.config/gopull
 	plugins         *plugins.Runner
+	disabledPlugins map[string]bool
+	pluginManager   PluginManagerModel
+	pluginVisible   bool
+	cookieJar       *cookiejar.Jar
 	pluginInfo      string
 	status          string
 	maxDisplayBytes int
@@ -136,6 +141,7 @@ func New(st *store.Store, version string) Model {
 		configDir:      st.Dir(),
 		version:        version,
 	}
+	m.cookieJar, _ = cookiejar.New(nil)
 	m.editor = m.editor.Focus()
 	return m
 }
@@ -143,7 +149,7 @@ func New(st *store.Store, version string) Model {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		loadDataCmd(m.store),
-		loadPluginsCmd(filepath.Join(m.configDir, "plugins")),
+		loadPluginsCmd(m.store, filepath.Join(m.configDir, "plugins")),
 		loadUserThemesCmd(m.configDir),
 		checkUpdateCmd(m.version),
 		spinner.Tick,
@@ -305,11 +311,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, c := range m.sidebar.Collections() {
 			if c.ID == msg.collID {
 				m.runner = newRunner(c)
-				m.runner = m.runner.SetSize(m.responsePaneWidth(), m.height-4)
+				m.runner = m.runner.SetSize(m.paneContentWidth(m.responsePaneWidth()), m.contentHeight())
 				m.runnerVisible = true
 				if len(m.runner.order) > 0 {
 					m.runner.running = true
-					return m, runNextRequestCmd(m.store, &m.runner, 0, core.Env{Values: m.envVars, SecretKeys: m.envSecrets}, m.timeout, m.plugins)
+					return m, runNextRequestCmd(m.store, &m.runner, 0, core.Env{Values: m.envVars, SecretKeys: m.envSecrets}, m.timeout, m.plugins, m.cookieJar)
 				}
 				return m, nil
 			}
@@ -320,7 +326,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runner = m.runner.SetResult(msg.idx, msg.result)
 		next := msg.idx + 1
 		if next < len(m.runner.order) {
-			return m, runNextRequestCmd(m.store, &m.runner, next, core.Env{Values: m.envVars, SecretKeys: m.envSecrets}, m.timeout, m.plugins)
+			return m, runNextRequestCmd(m.store, &m.runner, next, core.Env{Values: m.envVars, SecretKeys: m.envSecrets}, m.timeout, m.plugins, m.cookieJar)
 		}
 		m.runner.running = false
 		m.runner.done = true
@@ -335,7 +341,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case historyLoadedMsg:
 		m.diff = newDiff(msg.currentBody, msg.entries)
-		m.diff = m.diff.SetSize(m.responsePaneWidth(), m.height-4)
+		m.diff = m.diff.SetSize(m.paneContentWidth(m.responsePaneWidth()), m.contentHeight())
 		m.diffVisible = true
 		return m, nil
 
@@ -344,7 +350,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "history failed: " + msg.err.Error()
 			return m, clearStatusCmd()
 		}
-		m.history = newHistory(msg.entries).SetSize(m.width-10, m.height-4)
+		m.history = newHistory(msg.entries).SetSize(m.overlayContentWidth(112), m.contentHeight())
 		m.historyVisible = true
 		return m, textinput.Blink
 
@@ -404,10 +410,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pluginsLoadedMsg:
 		m.plugins = msg.runner
+		m.disabledPlugins = msg.disabled
+		m.pluginManager = newPluginManager(msg.runner.Infos()).SetSize(m.overlayContentWidth(96), m.contentHeight())
 		if n := msg.runner.Count(); n > 0 {
 			m.pluginInfo = fmt.Sprintf("%d plugin(s) loaded", n)
 		}
 		return m, nil
+
+	case pluginsUpdatedMsg:
+		if msg.err != nil {
+			m.status = "plugins failed: " + msg.err.Error()
+			return m, clearStatusCmd()
+		}
+		m.plugins = msg.runner
+		m.disabledPlugins = msg.disabled
+		m.pluginManager = newPluginManager(msg.runner.Infos()).SetSize(m.overlayContentWidth(96), m.contentHeight())
+		m.status = msg.status
+		return m, clearStatusCmd()
 
 	case userThemesLoadedMsg:
 		// Re-apply the active theme: if it's a user theme that just loaded,
@@ -449,9 +468,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			x := msg.X
 			sideEnd := 0
 			if m.sidebarVisible {
-				sideEnd = m.sidebarPaneWidth() + 4 + 1 // border(2) + padding(2) + separator(1)
+				sideEnd = m.sidebarPaneWidth() + paneGap
 			}
-			editorEnd := sideEnd + m.editorPaneWidth() + 4 + 1
+			editorEnd := sideEnd + m.editorPaneWidth() + paneGap
 			switch {
 			case m.sidebarVisible && x < sideEnd:
 				if m.focus != rfSidebar {
@@ -576,6 +595,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.historyVisible {
 			return m.updateHistory(msg)
 		}
+		if m.pluginVisible {
+			return m.updatePlugins(msg)
+		}
 		if m.diffVisible {
 			var cmd tea.Cmd
 			m.diff, cmd = m.diff.Update(msg)
@@ -649,6 +671,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.History):
 			return m, loadHistoryBrowserCmd(m.store)
 
+		case key.Matches(msg, keys.Plugins):
+			if m.plugins == nil {
+				m.plugins = plugins.LoadWithDisabled(filepath.Join(m.configDir, "plugins"), m.disabledPlugins)
+			}
+			m.pluginManager = newPluginManager(m.plugins.Infos()).SetSize(m.overlayContentWidth(96), m.contentHeight())
+			m.pluginVisible = true
+			return m, nil
+
 		case key.Matches(msg, keys.Import):
 			m.importActive = true
 			m.importInput.Focus()
@@ -700,27 +730,27 @@ func (m Model) View() string {
 		if m.focus == rfSidebar {
 			s = paneActive
 		}
-		panes = append(panes, s.Width(m.sidebarPaneWidth()).Render(m.sidebar.View()))
-		panes = append(panes, themedSpace(1))
+		panes = append(panes, m.paneFrameStyle(s, m.sidebarPaneWidth()).Render(m.sidebar.View()))
+		panes = append(panes, themedSpace(paneGap))
 	}
 
 	edStyle := pane
 	if m.focus == rfEditor {
 		edStyle = paneActive
 	}
-	panes = append(panes, edStyle.Width(m.editorPaneWidth()).Render(m.editor.View()))
-	panes = append(panes, themedSpace(1))
+	panes = append(panes, m.paneFrameStyle(edStyle, m.editorPaneWidth()).Render(m.editor.View()))
+	panes = append(panes, themedSpace(paneGap))
 
 	respStyle := pane
 	if m.focus == rfResponse {
 		respStyle = paneActive
 	}
-	panes = append(panes, respStyle.Width(m.responsePaneWidth()).Render(m.response.View()))
+	panes = append(panes, m.paneFrameStyle(respStyle, m.responsePaneWidth()).Render(m.response.View()))
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, panes...)
 
 	if m.welcomeVisible {
-		out := viewWelcome(m.welcomeStep, m.width, m.height)
+		out := m.fitFrame(viewWelcome(m.welcomeStep, m.width, m.height))
 		if colorBg != "" {
 			return "\033]11;" + string(colorBg) + "\007" + out
 		}
@@ -731,31 +761,40 @@ func (m Model) View() string {
 
 	switch {
 	case m.diffVisible:
-		overlay := paneActive.Width(m.width - 10).Render(m.diff.View())
-		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+		overlay := paneActive.Width(m.paneStyleWidth(m.overlayWidth(m.width - 6))).Render(m.diff.View())
+		out = m.withPinnedHint(m.placeOverlay(overlay))
 
 	case m.paletteVisible:
-		overlay := paneActive.Width(60).Render(m.palette.View())
-		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+		overlay := paneActive.Width(m.paneStyleWidth(m.overlayWidth(64))).Render(m.palette.View())
+		out = m.withPinnedHint(m.placeOverlay(overlay))
 
 	case m.historyVisible:
-		overlay := paneActive.Width(min(m.width-4, 116)).Render(m.history.SetSize(min(m.width-10, 112), m.height-4).View())
-		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+		overlayW := m.overlayWidth(116)
+		overlay := paneActive.Width(m.paneStyleWidth(overlayW)).Render(m.history.SetSize(m.paneContentWidth(overlayW), m.contentHeight()).View())
+		out = m.withPinnedHint(m.placeOverlay(overlay))
+
+	case m.pluginVisible:
+		overlayW := m.overlayWidth(96)
+		overlay := paneActive.Width(m.paneStyleWidth(overlayW)).Render(m.pluginManager.SetSize(m.paneContentWidth(overlayW), m.contentHeight()).View())
+		out = m.withPinnedHint(m.placeOverlay(overlay))
 
 	case m.runnerVisible:
-		overlay := paneActive.Width(m.responsePaneWidth()).Render(m.runner.View())
-		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+		overlayW := m.overlayWidth(m.responsePaneWidth())
+		overlay := paneActive.Width(m.paneStyleWidth(overlayW)).Render(m.runner.View())
+		out = m.withPinnedHint(m.placeOverlay(overlay))
 
 	case m.cheatsheetVisible:
-		overlay := paneActive.Width(min(m.width-4, 110)).Render(viewCheatsheet(m.width, m.height))
-		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+		overlayW := m.overlayWidth(110)
+		overlay := paneActive.Width(m.paneStyleWidth(overlayW)).Render(viewCheatsheet(m.paneContentWidth(overlayW), m.contentHeight()))
+		out = m.withPinnedHint(m.placeOverlay(overlay))
 
 	case m.settingsVisible:
-		overlay := paneActive.Width(m.settings.overlayWidth()).Render(m.settings.View())
-		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+		overlayW := m.overlayWidth(m.settings.overlayWidth())
+		overlay := paneActive.Width(m.paneStyleWidth(overlayW)).Render(m.settings.View())
+		out = m.withPinnedHint(m.placeOverlay(overlay))
 
 	case m.importActive:
-		overlay := paneActive.Width(72).Render(
+		overlay := paneActive.Width(m.paneStyleWidth(m.overlayWidth(76))).Render(
 			lipgloss.JoinVertical(lipgloss.Left,
 				sidebarTitle.Render("import collection"),
 				"",
@@ -765,18 +804,18 @@ func (m Model) View() string {
 				hint.Render("  enter import   esc cancel"),
 			),
 		)
-		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+		out = m.withPinnedHint(m.placeOverlay(overlay))
 
 	case m.envPickerVisible:
-		w := 72
+		w := 76
 		if m.envEditing {
-			w = min(m.width-4, 82)
+			w = 86
 		}
-		overlay := paneActive.Width(w).Render(m.viewEnvManager())
-		out = m.placeOverlay(overlay) + "\n" + m.viewHint()
+		overlay := paneActive.Width(m.paneStyleWidth(m.overlayWidth(w))).Render(m.viewEnvManager())
+		out = m.withPinnedHint(m.placeOverlay(overlay))
 
 	default:
-		out = lipgloss.JoinVertical(lipgloss.Left, body, m.viewHint())
+		out = m.withPinnedHint(body)
 	}
 
 	// OSC 11 sets the terminal's actual default background color so that
@@ -784,12 +823,23 @@ func (m Model) View() string {
 	// theme color instead of the terminal's native one.  Every frame we
 	// re-assert it so theme switches take effect immediately.
 	if colorBg != "" {
+		out = m.fitFrame(out)
 		out = "\033]11;" + string(colorBg) + "\007" + out
+	} else {
+		out = m.fitFrame(out)
 	}
 	return out
 }
 
-// placeOverlay centers an overlay panel within the content area (height-1)
+func (m Model) withPinnedHint(body string) string {
+	body = lipgloss.NewStyle().
+		MaxWidth(m.width).
+		MaxHeight(max(1, m.height-2)).
+		Render(body)
+	return lipgloss.JoinVertical(lipgloss.Left, body, m.viewHint())
+}
+
+// placeOverlay centers an overlay panel within the content area (height-2)
 // so there is always room for the hint bar below.
 //
 // When a background color is set we manually build each line of the backdrop
@@ -797,7 +847,7 @@ func (m Model) View() string {
 // paint cells that already have an ANSI reset from syntax highlighting.
 func (m Model) placeOverlay(overlay string) string {
 	if colorBg == "" {
-		return lipgloss.Place(m.width, m.height-2,
+		return lipgloss.Place(m.width, max(1, m.height-2),
 			lipgloss.Center, lipgloss.Center, overlay)
 	}
 
@@ -808,7 +858,7 @@ func (m Model) placeOverlay(overlay string) string {
 	oh := len(overlayLines)
 	ow := lipgloss.Width(overlay)
 
-	totalH := m.height - 1
+	totalH := max(1, m.height-2)
 	topPad := (totalH - oh) / 2
 	if topPad < 0 {
 		topPad = 0
@@ -859,57 +909,71 @@ func (m Model) viewHint() string {
 
 	left := env + breadcrumb + pluginIndicator
 
-	var mid string
+	var midRaw string
+	midStyle := statusBar
 	if m.status != "" {
-		mid = hint.Render(m.status)
+		midRaw = m.status
+		midStyle = hint
 	} else {
 		switch m.focus {
 		case rfSidebar:
 			if m.sidebar.PendingDelete() {
-				mid = statusErr.Render("d again to confirm   esc cancel")
+				midRaw = "d again to confirm   esc cancel"
+				midStyle = statusErr
 			} else if m.sidebar.InReqsMode() {
-				mid = "up/down navigate   enter open   n rename   ctrl+d duplicate   ctrl+j/k move   d delete   esc back"
+				midRaw = "up/down navigate   enter open   n rename   ctrl+d duplicate   ctrl+j/k move   d delete   esc back"
 			} else {
-				mid = "up/down navigate   enter open   r run   n rename   d delete   tab next"
+				midRaw = "up/down navigate   enter open   r run   n rename   d delete   tab next"
 			}
 		case rfEditor:
-			mid = "ctrl+r send   ctrl+s save   alt+n new   alt+j format   alt+m body mode   [/] tabs"
+			midRaw = "ctrl+r send   ctrl+s save   alt+n new   alt+j format   alt+m body mode   [/] tabs"
 		case rfResponse:
 			switch {
 			case m.response.InVisualMode():
-				mid = "j/k extend   y copy   esc cancel"
+				midRaw = "j/k extend   y copy   esc cancel"
 			case m.response.InTreeMode():
-				mid = "j/k navigate   space toggle   c collapse   e expand   {/} sibling   t exit"
+				midRaw = "j/k navigate   space toggle   c collapse   e expand   {/} sibling   t exit"
 			case m.response.HasJSONTree():
-				mid = "j/k scroll   / search   t tree   y copy   w save   D diff   [/] tabs"
+				midRaw = "j/k scroll   / search   t tree   y copy   w save   D diff   [/] tabs"
 			default:
-				mid = "j/k scroll   / search   y copy   w save   D diff   [/] tabs"
+				midRaw = "j/k scroll   / search   y copy   w save   D diff   [/] tabs"
 			}
 		}
-		mid = statusBar.Render(mid)
 	}
 
-	versionStr := "v" + m.version
+	versionRaw := "v" + m.version
 	if m.updateAvailable != "" {
-		versionStr = lipgloss.NewStyle().Foreground(colorWarn).Render("v"+m.version) +
-			lipgloss.NewStyle().Foreground(colorMuted).Render(" -> ") +
-			lipgloss.NewStyle().Foreground(colorSuccess).Render("v"+m.updateAvailable+" available")
-	} else {
-		versionStr = lipgloss.NewStyle().Foreground(colorMuted).Render("v" + m.version)
+		versionRaw = "v" + m.version + " -> v" + m.updateAvailable + " available"
 	}
-	right := statusBar.Render("alt+p palette  ctrl+e env  alt+h history  alt+o settings  alt+q quit") +
-		"  " + versionStr
+	rightRaw := "alt+p palette  ctrl+e env  alt+h history  alt+l plugins  alt+o settings  alt+q quit"
+	switch {
+	case m.width < 92:
+		rightRaw = "alt+p palette  alt+q quit"
+	case m.width < 126:
+		rightRaw = "alt+p palette  ctrl+e env  alt+h history  alt+q quit"
+	}
+
+	rightWidth := max(0, m.width-lipgloss.Width(left)-8)
+	right := statusBar.Render(clipText(rightRaw, rightWidth))
+	if rightWidth > 10 {
+		right += "  " + statusBar.Render(clipText(versionRaw, max(0, rightWidth-lipgloss.Width(right)-2)))
+	}
+
+	midWidth := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4
+	if midWidth < 0 {
+		midWidth = 0
+	}
+	mid := ""
+	if midWidth >= 18 {
+		mid = midStyle.Render(clipText(midRaw, midWidth))
+	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right) - 2
 	if gap < 1 {
 		gap = 1
 	}
 	bar := left + themedSpace(2) + mid + themedSpace(gap) + right
-	sepStyle := lipgloss.NewStyle().Foreground(colorBorder)
-	if colorBg != "" {
-		sepStyle = sepStyle.Background(colorBg)
-	}
-	sep := sepStyle.Render(strings.Repeat("-", m.width))
+	sep := mutedRule(m.width)
 	return sep + "\n" + bar
 }
 
@@ -941,6 +1005,13 @@ func (m Model) execPaletteAction(msg paletteExecMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "history":
 		return m, loadHistoryBrowserCmd(m.store)
+	case "plugins":
+		if m.plugins == nil {
+			m.plugins = plugins.LoadWithDisabled(filepath.Join(m.configDir, "plugins"), m.disabledPlugins)
+		}
+		m.pluginManager = newPluginManager(m.plugins.Infos()).SetSize(m.overlayContentWidth(96), m.contentHeight())
+		m.pluginVisible = true
+		return m, nil
 	case "import":
 		m.importActive = true
 		m.importInput.Focus()
@@ -952,6 +1023,9 @@ func (m Model) execPaletteAction(msg paletteExecMsg) (tea.Model, tea.Cmd) {
 	case "export_http":
 		m.status = ""
 		return m.doExportHTTP()
+	case "export_plain":
+		m.status = ""
+		return m.doExportPlain()
 	case "curl_export":
 		return m.doCurlExport()
 	case "external_editor":
@@ -976,6 +1050,42 @@ func (m Model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.palette, cmd = m.palette.Update(msg)
 	return m, cmd
+}
+
+func (m Model) updatePlugins(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.pluginVisible = false
+		return m, nil
+	case "r":
+		return m, reloadPluginsCmd(m.store, filepath.Join(m.configDir, "plugins"), m.disabledPlugins, "plugins reloaded")
+	case " ":
+		info, ok := m.pluginManager.Selected()
+		if !ok {
+			return m, nil
+		}
+		disabled := cloneDisabledPlugins(m.disabledPlugins)
+		key := filepath.Base(info.Path)
+		if info.Enabled {
+			disabled[key] = true
+		} else {
+			delete(disabled, key)
+		}
+		return m, savePluginStateCmd(m.store, filepath.Join(m.configDir, "plugins"), disabled)
+	}
+	var cmd tea.Cmd
+	m.pluginManager, cmd = m.pluginManager.Update(msg)
+	return m, cmd
+}
+
+func cloneDisabledPlugins(in map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for k, v := range in {
+		if v {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 func (m Model) updateEnvPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1033,59 +1143,10 @@ func (m *Model) refreshEnvPicker() {
 func (m Model) applyEnv(e *store.Environment) Model {
 	m.activeEnvID = e.ID
 	m.activeEnvName = e.Name
-	vars := make(map[string]string, len(e.Variables))
-	secrets := make(map[string]bool)
-	// dotenv file vars come first so inline variables can override them
-	if e.DotenvPath != "" {
-		for k, v := range parseDotenv(e.DotenvPath) {
-			vars[k] = v
-		}
-	}
-	for _, v := range e.Variables {
-		if v.Enabled {
-			vars[v.Key] = v.Value
-			if v.Secret {
-				secrets[v.Key] = true
-			} else {
-				delete(secrets, v.Key)
-			}
-		}
-	}
-	m.envVars = vars
-	m.envSecrets = secrets
+	resolved := store.ResolveEnvironment(e)
+	m.envVars = resolved.Values
+	m.envSecrets = resolved.SecretKeys
 	return m
-}
-
-// Supports: KEY=value, KEY="value", KEY='value', export KEY=value, # comments.
-func parseDotenv(path string) map[string]string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	vars := map[string]string{}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		idx := strings.IndexByte(line, '=')
-		if idx <= 0 {
-			continue
-		}
-		k := strings.TrimSpace(line[:idx])
-		v := strings.TrimSpace(line[idx+1:])
-		// strip surrounding quotes
-		if len(v) >= 2 {
-			if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
-				v = v[1 : len(v)-1]
-			}
-		}
-		if k != "" {
-			vars[k] = v
-		}
-	}
-	return vars
 }
 
 func (m Model) updateImportOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1159,7 +1220,7 @@ func (m Model) doSend() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.spin.Tick, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		run, err := core.RunRequest(ctx, req, env, core.RunOptions{Plugins: pluginRunner})
+		run, err := core.RunRequest(ctx, req, env, core.RunOptions{Plugins: pluginRunner, Jar: m.cookieJar})
 		if err != nil {
 			logs := []string(nil)
 			if run != nil {
@@ -1266,44 +1327,97 @@ func (m Model) doExport() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) relayout() {
-	ph := m.height - 4 // 2 border rows + 2 hint rows (separator + bar)
+	contentH := m.contentHeight()
 
 	sideW := m.sidebarPaneWidth()
 	edW := m.editorPaneWidth()
 	respW := m.responsePaneWidth()
 
 	if m.sidebarVisible {
-		m.sidebar = m.sidebar.SetSize(sideW-4, ph-2)
+		m.sidebar = m.sidebar.SetSize(m.paneContentWidth(sideW), contentH)
 	}
-	m.editor = m.editor.setSize(edW, ph)
-	m.response = m.response.SetSize(respW, ph)
+	m.editor = m.editor.setSize(m.paneContentWidth(edW), contentH)
+	m.response = m.response.SetSize(m.paneContentWidth(respW), contentH)
 
 	m.envPicker.SetSize(68, min(len(m.environments)+4, 14))
-	m.envEditor = m.envEditor.SetSize(72, ph)
-	m.history = m.history.SetSize(min(m.width-10, 112), ph)
+	m.envEditor = m.envEditor.SetSize(m.overlayContentWidth(82), contentH)
+	m.history = m.history.SetSize(m.overlayContentWidth(112), contentH)
 }
 
 func (m Model) sidebarPaneWidth() int {
 	if !m.sidebarVisible {
 		return 0
 	}
-	return 32
+	avail := max(1, m.width-visiblePaneGaps(m.sidebarVisible))
+	if avail < 72 {
+		return max(1, min(24, avail/3))
+	}
+	return min(32, max(1, avail/5))
 }
 
 func (m Model) editorPaneWidth() int {
-	avail := m.width - 2
+	avail := max(1, m.width-visiblePaneGaps(m.sidebarVisible))
 	if m.sidebarVisible {
-		avail -= m.sidebarPaneWidth() + 1
+		avail -= m.sidebarPaneWidth()
 	}
-	return avail / 2
+	return max(1, avail/2)
 }
 
 func (m Model) responsePaneWidth() int {
-	avail := m.width - 2
+	avail := max(1, m.width-visiblePaneGaps(m.sidebarVisible))
 	if m.sidebarVisible {
-		avail -= m.sidebarPaneWidth() + 1
+		avail -= m.sidebarPaneWidth()
 	}
-	return avail - m.editorPaneWidth()
+	return max(1, avail-m.editorPaneWidth())
+}
+
+const (
+	paneGap          = 1
+	paneChromeWidth  = 4
+	paneChromeHeight = 2
+)
+
+func visiblePaneGaps(sidebar bool) int {
+	if sidebar {
+		return paneGap * 2
+	}
+	return paneGap
+}
+
+func (m Model) contentHeight() int {
+	return max(1, m.height-2-paneChromeHeight)
+}
+
+func (m Model) paneContentWidth(total int) int {
+	return max(1, total-paneChromeWidth)
+}
+
+func (m Model) paneStyleWidth(total int) int {
+	return m.paneContentWidth(total)
+}
+
+func (m Model) paneFrameStyle(s lipgloss.Style, totalWidth int) lipgloss.Style {
+	return s.
+		Width(m.paneStyleWidth(totalWidth)).
+		Height(m.contentHeight())
+}
+
+func (m Model) overlayWidth(maxTotal int) int {
+	return max(1, min(maxTotal, max(1, m.width-2)))
+}
+
+func (m Model) overlayContentWidth(maxTotal int) int {
+	return m.paneContentWidth(m.overlayWidth(maxTotal))
+}
+
+func (m Model) fitFrame(out string) string {
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
+	return lipgloss.NewStyle().
+		MaxWidth(m.width).
+		MaxHeight(m.height).
+		Render(out)
 }
 
 func (m Model) focusPanel(p rootFocus) Model {
@@ -1389,6 +1503,8 @@ func appendHistoryCmd(st *store.Store, r *result, ed EditorModel) tea.Cmd {
 			Method:   req.Method,
 			URL:      req.URL,
 			Headers:  make(map[string]string),
+			Query:    req.Query,
+			Path:     req.Path,
 			Body:     req.Body.Raw,
 			BodyMode: req.Body.Mode,
 			Auth:     req.Auth,
@@ -1445,6 +1561,17 @@ func importFileCmd(st *store.Store, path string) tea.Cmd {
 		// Remote URL: fetch and import as OpenAPI.
 		if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 			col, err := store.FetchAndImportOpenAPI(path)
+			if err != nil {
+				return importDoneMsg{err: err}
+			}
+			if err := st.SaveCollection(col); err != nil {
+				return importDoneMsg{err: fmt.Errorf("save: %w", err)}
+			}
+			return importDoneMsg{col: col}
+		}
+
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			col, err := store.LoadPlainCollection(path)
 			if err != nil {
 				return importDoneMsg{err: err}
 			}
@@ -1522,6 +1649,37 @@ func (m Model) doExportHTTP() (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) doExportPlain() (tea.Model, tea.Cmd) {
+	collID := m.sidebar.activeCollID
+	if collID == "" {
+		m.status = "no collection open to export"
+		return m, clearStatusCmd()
+	}
+	st := m.store
+	return m, func() tea.Msg {
+		cols, err := st.LoadCollections()
+		if err != nil {
+			return exportDoneMsg{err: err}
+		}
+		var target *store.Collection
+		for _, c := range cols {
+			if c.ID == collID {
+				target = c
+				break
+			}
+		}
+		if target == nil {
+			return exportDoneMsg{err: fmt.Errorf("collection not found")}
+		}
+		dir := sanitizeFilename(target.Name) + ".gopull.d"
+		if err := store.ExportPlainCollection(target, dir); err != nil {
+			return exportDoneMsg{err: err}
+		}
+		abs, _ := filepath.Abs(dir)
+		return exportDoneMsg{path: abs}
+	}
+}
+
 func saveBodyCmd(body, contentType string) tea.Cmd {
 	return func() tea.Msg {
 		ext := extForContentType(contentType)
@@ -1579,7 +1737,7 @@ func saveSettingsCmd(st *store.Store, theme string, timeoutSecs int) tea.Cmd {
 	}
 }
 
-func runNextRequestCmd(st *store.Store, runner *RunnerModel, idx int, env core.Env, timeout time.Duration, pluginRunner *plugins.Runner) tea.Cmd {
+func runNextRequestCmd(st *store.Store, runner *RunnerModel, idx int, env core.Env, timeout time.Duration, pluginRunner *plugins.Runner, jar *cookiejar.Jar) tea.Cmd {
 	if idx < 0 || idx >= len(runner.order) {
 		return nil
 	}
@@ -1599,7 +1757,7 @@ func runNextRequestCmd(st *store.Store, runner *RunnerModel, idx int, env core.E
 		ctx, cancel := context.WithTimeout(context.Background(), t)
 		defer cancel()
 		start := time.Now()
-		run, err := core.RunRequest(ctx, collectionReq, env, core.RunOptions{Plugins: pluginRunner})
+		run, err := core.RunRequest(ctx, collectionReq, env, core.RunOptions{Plugins: pluginRunner, Jar: jar})
 		elapsed := time.Since(start)
 		rr := runnerResult{name: collectionReq.Name, done: true, elapsed: elapsed}
 		if err != nil {
@@ -1751,9 +1909,33 @@ func clearStatusCmd() tea.Cmd {
 	})
 }
 
-func loadPluginsCmd(dir string) tea.Cmd {
+func loadPluginsCmd(st *store.Store, dir string) tea.Cmd {
 	return func() tea.Msg {
-		return pluginsLoadedMsg{runner: plugins.Load(dir)}
+		disabled, _ := st.LoadDisabledPlugins()
+		return pluginsLoadedMsg{runner: plugins.LoadWithDisabled(dir, disabled), disabled: disabled}
+	}
+}
+
+func reloadPluginsCmd(st *store.Store, dir string, disabled map[string]bool, status string) tea.Cmd {
+	return func() tea.Msg {
+		return pluginsUpdatedMsg{
+			runner:   plugins.LoadWithDisabled(dir, disabled),
+			disabled: disabled,
+			status:   status,
+		}
+	}
+}
+
+func savePluginStateCmd(st *store.Store, dir string, disabled map[string]bool) tea.Cmd {
+	return func() tea.Msg {
+		if err := st.SaveDisabledPlugins(disabled); err != nil {
+			return pluginsUpdatedMsg{err: err}
+		}
+		return pluginsUpdatedMsg{
+			runner:   plugins.LoadWithDisabled(dir, disabled),
+			disabled: disabled,
+			status:   "plugin state saved",
+		}
 	}
 }
 

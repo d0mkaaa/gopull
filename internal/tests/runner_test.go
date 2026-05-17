@@ -37,3 +37,16 @@ func TestRunReportsJSONPathMiss(t *testing.T) {
 		t.Fatalf("actual: got %q", got.Assertions[0].Actual)
 	}
 }
+
+func TestRunSetsEnvFromHeaderStatusAndResponseTime(t *testing.T) {
+	got := Run("set NEXT = header Location\nset CODE = status\nset MS = response_time", 201, nil, "Location: /next\n", 150*time.Millisecond)
+	if got.EnvUpdates["NEXT"] != "/next" {
+		t.Fatalf("header capture: got %q", got.EnvUpdates["NEXT"])
+	}
+	if got.EnvUpdates["CODE"] != "201" {
+		t.Fatalf("status capture: got %q", got.EnvUpdates["CODE"])
+	}
+	if got.EnvUpdates["MS"] != "150" {
+		t.Fatalf("time capture: got %q", got.EnvUpdates["MS"])
+	}
+}

@@ -393,10 +393,11 @@ func (m ResponseModel) View() string {
 		pct := int(m.viewport.ScrollPercent() * 100)
 		elapsedStr := m.result.elapsed.Round(time.Millisecond).String()
 		pipe := lipgloss.NewStyle().Foreground(colorBorder).Render(" | ")
+		ct := clipText(m.result.contentType, max(10, m.width-42))
 		statusLine = statusStyle(m.result.code).Render(m.result.status) +
 			pipe + elapsedColor(m.result.elapsed).Render(elapsedStr) +
 			pipe + hint.Render(formatSize(m.result.size)) +
-			pipe + hint.Render(m.result.contentType) +
+			pipe + hint.Render(ct) +
 			pipe + hint.Render(fmt.Sprintf("%d%%", pct))
 	default:
 		statusLine = hint.Render("no response yet")
@@ -453,9 +454,17 @@ func (m ResponseModel) View() string {
 		extra = "\n" + hint.Render("tree   space toggle   c collapse all   e expand all   {/} sibling   t exit")
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		statusLine, "", tabs, extra, m.viewport.View(),
-	)
+	statusLine = fillLine(statusLine, m.ruleWidth())
+	parts := []string{statusLine, mutedRule(m.ruleWidth()), tabs}
+	if extra != "" {
+		parts = append(parts, extra)
+	}
+	parts = append(parts, m.viewport.View())
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func (m ResponseModel) ruleWidth() int {
+	return max(0, m.width-2)
 }
 
 func (m ResponseModel) matchCountStr() string {
@@ -492,8 +501,8 @@ func (m ResponseModel) Blur() ResponseModel {
 func (m ResponseModel) SetSize(w, h int) ResponseModel {
 	m.width = w
 	m.height = h
-	m.viewport.Width = w - 4
-	m.viewport.Height = max(3, h-5)
+	m.viewport.Width = max(1, m.ruleWidth())
+	m.viewport.Height = max(3, h-6)
 	return m.refreshViewport()
 }
 
@@ -613,7 +622,7 @@ func (m ResponseModel) refreshViewport() ResponseModel {
 			m.viewport.SetContent(wrapText(m.result.body, m.viewport.Width))
 		}
 	case rtHeaders:
-		m.viewport.SetContent(m.result.rawHeaders)
+		m.viewport.SetContent(wrapHeaderText(m.result.rawHeaders, m.viewport.Width))
 	case rtTests:
 		m.viewport.SetContent(m.renderTestRows())
 	}
@@ -729,7 +738,7 @@ func (m ResponseModel) visualSelection() string {
 	case rtBody:
 		source = m.result.plainBody
 	case rtHeaders:
-		source = m.result.rawHeaders
+		source = wrapHeaderText(m.result.rawHeaders, m.viewport.Width)
 	default:
 		return ""
 	}
@@ -786,7 +795,7 @@ func (m ResponseModel) applySearch(query string) ResponseModel {
 	case rtBody:
 		source = wrapText(m.result.plainBody, m.viewport.Width)
 	case rtHeaders:
-		source = m.result.rawHeaders
+		source = wrapHeaderText(m.result.rawHeaders, m.viewport.Width)
 	}
 
 	re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(query))
@@ -829,7 +838,7 @@ func (m ResponseModel) refreshViewportNoSearch() ResponseModel {
 	case rtBody:
 		m.viewport.SetContent(wrapText(m.result.body, m.viewport.Width))
 	case rtHeaders:
-		m.viewport.SetContent(m.result.rawHeaders)
+		m.viewport.SetContent(wrapHeaderText(m.result.rawHeaders, m.viewport.Width))
 	}
 	return m
 }
@@ -979,6 +988,34 @@ func wrapText(s string, width int) string {
 		if cur.Len() > 0 {
 			out = append(out, cur.String())
 		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapHeaderText(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	soft := wrapText(s, width)
+	var out []string
+	for _, line := range strings.Split(soft, "\n") {
+		for lipgloss.Width(line) > width {
+			var b strings.Builder
+			for _, r := range line {
+				next := b.String() + string(r)
+				if lipgloss.Width(next) > width {
+					break
+				}
+				b.WriteRune(r)
+			}
+			part := b.String()
+			if part == "" {
+				break
+			}
+			out = append(out, part)
+			line = strings.TrimPrefix(line, part)
+		}
+		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
 }

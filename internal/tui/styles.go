@@ -89,14 +89,14 @@ func renderTabs(names []string, active int, focused bool) string {
 	for i, name := range names {
 		switch {
 		case i == active && focused:
-			parts[i] = tabActive.Render("[" + name + "]")
+			parts[i] = tabActive.Render(" " + name + " ")
 		case i == active:
-			parts[i] = tabFocused.Render("[" + name + "]")
+			parts[i] = tabFocused.Render(" " + name + " ")
 		default:
-			parts[i] = tabInactive.Render(name)
+			parts[i] = tabInactive.Render(" " + name + " ")
 		}
 	}
-	return strings.Join(parts, subtleText("  "))
+	return strings.Join(parts, subtleText(" "))
 }
 
 func themedSpace(n int) string {
@@ -116,4 +116,47 @@ func subtleText(s string) string {
 		st = st.Background(colorBg)
 	}
 	return st.Render(s)
+}
+
+func clipText(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	if width <= 3 {
+		return strings.Repeat(".", width)
+	}
+	out := ""
+	for _, r := range s {
+		next := out + string(r)
+		if lipgloss.Width(next)+3 > width {
+			break
+		}
+		out = next
+	}
+	return out + "..."
+}
+
+func fillLine(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	w := lipgloss.Width(s)
+	if w >= width {
+		return s
+	}
+	return s + themedSpace(width-w)
+}
+
+func mutedRule(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	st := lipgloss.NewStyle().Foreground(colorBorder)
+	if colorBg != "" {
+		st = st.Background(colorBg)
+	}
+	return st.Render(strings.Repeat("-", width))
 }

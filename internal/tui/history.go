@@ -161,6 +161,8 @@ func requestFromHistory(e store.HistoryEntry) store.Request {
 		Name:    historyRequestName(e),
 		Method:  e.Request.Method,
 		URL:     e.Request.URL,
+		Query:   e.Request.Query,
+		Path:    e.Request.Path,
 		Body:    store.Body{Mode: bodyMode, Raw: e.Request.Body},
 		Auth:    e.Request.Auth,
 		Options: e.Request.Options,
@@ -255,7 +257,7 @@ func (m Model) handleHistoryAction(msg historyActionMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.diff = newDiff(msg.entry.Response.Body, others)
-		m.diff = m.diff.SetSize(m.responsePaneWidth(), m.height-4)
+		m.diff = m.diff.SetSize(m.paneContentWidth(m.responsePaneWidth()), m.contentHeight())
 		m.diffVisible = true
 		return m, nil
 	}

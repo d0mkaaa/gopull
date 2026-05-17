@@ -162,10 +162,10 @@ func TestRenderTabsSingleTab(t *testing.T) {
 
 func TestRenderTabsActiveMarkerAndSpacerPresent(t *testing.T) {
 	out := renderTabs([]string{"a", "b", "c"}, 0, true)
-	if !strings.Contains(out, "[a]") {
-		t.Errorf("active tab should be bracketed, got: %q", out)
+	if !strings.Contains(out, " a ") {
+		t.Errorf("active tab should be padded, got: %q", out)
 	}
-	if !strings.Contains(out, "  ") {
+	if !strings.Contains(out, " ") {
 		t.Errorf("tabs should be spaced, got: %q", out)
 	}
 }

@@ -56,7 +56,7 @@ func newRunner(c *store.Collection) RunnerModel {
 }
 
 func (m RunnerModel) SetSize(w, h int) RunnerModel {
-	m.viewport.Width = w - 4
+	m.viewport.Width = max(1, w)
 	m.viewport.Height = max(3, h-4)
 	return m
 }

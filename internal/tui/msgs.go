@@ -136,7 +136,15 @@ type runnerResultMsg struct {
 type runnerDoneMsg struct{}
 
 type pluginsLoadedMsg struct {
-	runner *plugins.Runner
+	runner   *plugins.Runner
+	disabled map[string]bool
+}
+
+type pluginsUpdatedMsg struct {
+	runner   *plugins.Runner
+	disabled map[string]bool
+	status   string
+	err      error
 }
 
 type externalEditorDoneMsg struct {

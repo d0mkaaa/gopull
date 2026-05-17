@@ -7,13 +7,18 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/d0mkaaa/gopull/internal/cli"
 	"github.com/d0mkaaa/gopull/internal/store"
 	"github.com/d0mkaaa/gopull/internal/tui"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "run" {
+		os.Exit(cli.Run(os.Args[2:], version))
+	}
+
 	ver := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 

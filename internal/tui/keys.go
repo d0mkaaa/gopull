@@ -14,6 +14,7 @@ type keyMap struct {
 	Settings       key.Binding
 	EnvPicker      key.Binding
 	History        key.Binding
+	Plugins        key.Binding
 	BodyMode       key.Binding
 	PrettyPrint    key.Binding
 	Search         key.Binding
@@ -73,6 +74,10 @@ var keys = keyMap{
 		key.WithKeys("alt+h"),
 		key.WithHelp("alt+h", "history"),
 	),
+	Plugins: key.NewBinding(
+		key.WithKeys("alt+l"),
+		key.WithHelp("alt+l", "plugins"),
+	),
 	// alt+m avoids VS Code terminal tab interception of ctrl+t
 	BodyMode: key.NewBinding(
 		key.WithKeys("alt+m"),
@@ -130,6 +135,7 @@ func applyKeyOverrides(kb map[string]string) {
 	set(&keys.Settings, "settings")
 	set(&keys.EnvPicker, "env")
 	set(&keys.History, "history")
+	set(&keys.Plugins, "plugins")
 	set(&keys.BodyMode, "body_mode")
 	set(&keys.PrettyPrint, "format")
 	set(&keys.Search, "search")

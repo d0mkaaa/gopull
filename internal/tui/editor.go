@@ -18,13 +18,14 @@ type editorTab int
 
 const (
 	etBody editorTab = iota
+	etParams
 	etHeaders
 	etAuth
 	etTests
 	etOpts
 )
 
-var editorTabNames = []string{"body", "headers", "auth", "tests", "opts"}
+var editorTabNames = []string{"body", "params", "headers", "auth", "tests", "opts"}
 
 type authKind int
 
@@ -48,27 +49,34 @@ type EditorModel struct {
 	method       textinput.Model
 	url          textinput.Model
 	bodyInput    textarea.Model
+	queryInput   textarea.Model
+	pathInput    textarea.Model
 	headersInput textarea.Model
 	testsInput   textarea.Model
 	tokenInput   textinput.Model
 	userInput    textinput.Model
 	passInput    textinput.Model
 
-	tab       editorTab
-	bodyMode  string // "raw" or "form"
-	authKind  authKind
-	authField int // 0=first, 1=second; -1=type selector
-	inner     editorInner
-	focused   bool
+	tab         editorTab
+	bodyMode    string // raw, form, graphql, multipart, file
+	authKind    authKind
+	authField   int // 0=first, 1=second; -1=type selector
+	paramsField int // 0=query, 1=path
+	inner       editorInner
+	focused     bool
 
 	methodCustom  bool   // true when user is typing a non-standard method
 	lastStdMethod string // method value before entering custom mode
 
-	optsField        int // 0=skipVerify, 1=disableRedirects, 2=proxyURL, 3=timeout
+	optsField        int // 0=skipVerify, 1=disableRedirects, 2=cookieJar, 3=proxyURL, 4=timeout, 5=CA, 6=cert, 7=key
 	skipVerify       bool
 	disableRedirects bool
+	useCookieJar     bool
 	proxyInput       textinput.Model
 	perReqTimeout    textinput.Model
+	caBundleInput    textinput.Model
+	clientCertInput  textinput.Model
+	clientKeyInput   textinput.Model
 
 	requestID    string
 	collectionID string
@@ -93,6 +101,16 @@ func newEditor(w, h int) EditorModel {
 	b.Placeholder = "Request body..."
 	b.ShowLineNumbers = false
 	b.Prompt = ""
+
+	q := textarea.New()
+	q.Placeholder = "page=1\n# debug=true"
+	q.ShowLineNumbers = false
+	q.Prompt = ""
+
+	p := textarea.New()
+	p.Placeholder = "id=123\norg=acme"
+	p.ShowLineNumbers = false
+	p.Prompt = ""
 
 	h2 := textarea.New()
 	h2.Placeholder = "Content-Type: application/json\nAuthorization: Bearer token\n# X-Disabled-Header: value"
@@ -125,21 +143,38 @@ func newEditor(w, h int) EditorModel {
 	tout.Placeholder = "0"
 	tout.CharLimit = 6
 
+	ca := textinput.New()
+	ca.Placeholder = "/path/to/ca.pem"
+	ca.CharLimit = 1024
+
+	cert := textinput.New()
+	cert.Placeholder = "/path/to/client.pem"
+	cert.CharLimit = 1024
+
+	key := textinput.New()
+	key.Placeholder = "/path/to/client.key"
+	key.CharLimit = 1024
+
 	ed := EditorModel{
-		method:        m,
-		url:           u,
-		bodyInput:     b,
-		headersInput:  h2,
-		testsInput:    t,
-		tokenInput:    tok,
-		userInput:     usr,
-		passInput:     pass,
-		proxyInput:    proxy,
-		perReqTimeout: tout,
-		bodyMode:      "raw",
-		authField:     -1,
-		width:         w,
-		height:        h,
+		method:          m,
+		url:             u,
+		bodyInput:       b,
+		queryInput:      q,
+		pathInput:       p,
+		headersInput:    h2,
+		testsInput:      t,
+		tokenInput:      tok,
+		userInput:       usr,
+		passInput:       pass,
+		proxyInput:      proxy,
+		perReqTimeout:   tout,
+		caBundleInput:   ca,
+		clientCertInput: cert,
+		clientKeyInput:  key,
+		bodyMode:        "raw",
+		authField:       -1,
+		width:           w,
+		height:          h,
 	}
 	return ed.setSize(w, h).RefreshTheme()
 }
@@ -150,37 +185,68 @@ func applyTextareaTheme(t *textarea.Model) {
 	if colorBg != "" {
 		base = base.Background(colorBg)
 	}
+	text := lipgloss.NewStyle().Foreground(colorText)
+	placeholder := lipgloss.NewStyle().Foreground(colorMuted)
+	cursorLine := lipgloss.NewStyle().Foreground(colorText)
+	endOfBuffer := lipgloss.NewStyle().Foreground(colorBorder)
+	prompt := lipgloss.NewStyle().Foreground(colorSubtle)
+	blurredText := lipgloss.NewStyle().Foreground(colorSubtle)
+	blurredPlaceholder := lipgloss.NewStyle().Foreground(colorBorder)
+	cursor := lipgloss.NewStyle().Foreground(colorAccent)
+	if colorBg != "" {
+		text = text.Background(colorBg)
+		placeholder = placeholder.Background(colorBg)
+		cursorLine = cursorLine.Background(colorBg)
+		endOfBuffer = endOfBuffer.Background(colorBg)
+		prompt = prompt.Background(colorBg)
+		blurredText = blurredText.Background(colorBg)
+		blurredPlaceholder = blurredPlaceholder.Background(colorBg)
+		cursor = cursor.Background(colorBg)
+	}
 
 	t.FocusedStyle = textarea.Style{
 		Base:        base,
-		Text:        lipgloss.NewStyle().Foreground(colorText),
-		Placeholder: lipgloss.NewStyle().Foreground(colorMuted),
-		CursorLine:  base,
-		EndOfBuffer: lipgloss.NewStyle().Foreground(colorBorder),
-		Prompt:      lipgloss.NewStyle().Foreground(colorSubtle),
+		Text:        text,
+		Placeholder: placeholder,
+		CursorLine:  cursorLine,
+		EndOfBuffer: endOfBuffer,
+		Prompt:      prompt,
 	}
 	t.BlurredStyle = textarea.Style{
 		Base:        base,
-		Text:        lipgloss.NewStyle().Foreground(colorSubtle),
-		Placeholder: lipgloss.NewStyle().Foreground(colorBorder),
-		EndOfBuffer: lipgloss.NewStyle().Foreground(colorBorder),
-		Prompt:      lipgloss.NewStyle().Foreground(colorBorder),
+		Text:        blurredText,
+		Placeholder: blurredPlaceholder,
+		CursorLine:  base,
+		EndOfBuffer: endOfBuffer,
+		Prompt:      blurredPlaceholder,
 	}
-	t.Cursor.Style = lipgloss.NewStyle().Foreground(colorAccent)
+	t.Cursor.Style = cursor
 }
 
 // applyTextinputTheme stamps the current theme colors onto a textinput widget.
 func applyTextinputTheme(t *textinput.Model) {
-	t.PlaceholderStyle = lipgloss.NewStyle().Foreground(colorMuted)
-	t.TextStyle = lipgloss.NewStyle().Foreground(colorText)
-	t.PromptStyle = lipgloss.NewStyle().Foreground(colorSubtle)
-	t.Cursor.Style = lipgloss.NewStyle().Foreground(colorAccent)
+	placeholder := lipgloss.NewStyle().Foreground(colorMuted)
+	text := lipgloss.NewStyle().Foreground(colorText)
+	prompt := lipgloss.NewStyle().Foreground(colorSubtle)
+	cursor := lipgloss.NewStyle().Foreground(colorAccent)
+	if colorBg != "" {
+		placeholder = placeholder.Background(colorBg)
+		text = text.Background(colorBg)
+		prompt = prompt.Background(colorBg)
+		cursor = cursor.Background(colorBg)
+	}
+	t.PlaceholderStyle = placeholder
+	t.TextStyle = text
+	t.PromptStyle = prompt
+	t.Cursor.Style = cursor
 }
 
 // RefreshTheme re-applies the current theme palette to every input widget.
 // Call this after applyTheme() to keep input colors in sync.
 func (m EditorModel) RefreshTheme() EditorModel {
 	applyTextareaTheme(&m.bodyInput)
+	applyTextareaTheme(&m.queryInput)
+	applyTextareaTheme(&m.pathInput)
 	applyTextareaTheme(&m.headersInput)
 	applyTextareaTheme(&m.testsInput)
 	applyTextinputTheme(&m.method)
@@ -190,6 +256,9 @@ func (m EditorModel) RefreshTheme() EditorModel {
 	applyTextinputTheme(&m.passInput)
 	applyTextinputTheme(&m.proxyInput)
 	applyTextinputTheme(&m.perReqTimeout)
+	applyTextinputTheme(&m.caBundleInput)
+	applyTextinputTheme(&m.clientCertInput)
+	applyTextinputTheme(&m.clientKeyInput)
 	return m
 }
 
@@ -221,6 +290,12 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 					m.bodyInput.SetValue("{\n  \"query\": \"\",\n  \"variables\": {}\n}")
 				}
 				m.bodyInput.Placeholder = "{\"query\": \"\", \"variables\": {}}"
+			case "graphql":
+				m.bodyMode = "multipart"
+				m.bodyInput.Placeholder = "name=value\nfile avatar=C:\\path\\avatar.png"
+			case "multipart":
+				m.bodyMode = "file"
+				m.bodyInput.Placeholder = "C:\\path\\body.json"
 			default:
 				m.bodyMode = "raw"
 				m.bodyInput.Placeholder = "Request body..."
@@ -279,6 +354,19 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 			}
 		}
 
+		if m.inner == eiContent && m.tab == etParams {
+			switch km.Type {
+			case tea.KeyUp, tea.KeyDown:
+				if m.paramsField == 0 {
+					m.paramsField = 1
+				} else {
+					m.paramsField = 0
+				}
+				m = m.focusContent()
+				return m, nil
+			}
+		}
+
 		if m.inner == eiContent && m.tab == etOpts {
 			switch km.Type {
 			case tea.KeyUp:
@@ -288,7 +376,7 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 				}
 				return m, nil
 			case tea.KeyDown:
-				if m.optsField < 3 {
+				if m.optsField < 7 {
 					m.optsField++
 					m = m.focusOptsField()
 				}
@@ -299,6 +387,8 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 					m.skipVerify = !m.skipVerify
 				case 1:
 					m.disableRedirects = !m.disableRedirects
+				case 2:
+					m.useCookieJar = !m.useCookieJar
 				}
 				return m, nil
 			}
@@ -329,6 +419,13 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 		switch m.tab {
 		case etBody:
 			m.bodyInput, cmd = m.bodyInput.Update(msg)
+		case etParams:
+			switch m.paramsField {
+			case 1:
+				m.pathInput, cmd = m.pathInput.Update(msg)
+			default:
+				m.queryInput, cmd = m.queryInput.Update(msg)
+			}
 		case etHeaders:
 			m.headersInput, cmd = m.headersInput.Update(msg)
 		case etTests:
@@ -339,10 +436,16 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 			}
 		case etOpts:
 			switch m.optsField {
-			case 2:
-				m.proxyInput, cmd = m.proxyInput.Update(msg)
 			case 3:
+				m.proxyInput, cmd = m.proxyInput.Update(msg)
+			case 4:
 				m.perReqTimeout, cmd = m.perReqTimeout.Update(msg)
+			case 5:
+				m.caBundleInput, cmd = m.caBundleInput.Update(msg)
+			case 6:
+				m.clientCertInput, cmd = m.clientCertInput.Update(msg)
+			case 7:
+				m.clientKeyInput, cmd = m.clientKeyInput.Update(msg)
 			}
 		}
 	}
@@ -423,6 +526,8 @@ func (m EditorModel) nextTab() EditorModel {
 
 func (m EditorModel) focusContent() EditorModel {
 	m.bodyInput.Blur()
+	m.queryInput.Blur()
+	m.pathInput.Blur()
 	m.headersInput.Blur()
 	m.testsInput.Blur()
 	m.tokenInput.Blur()
@@ -433,6 +538,12 @@ func (m EditorModel) focusContent() EditorModel {
 	switch m.tab {
 	case etBody:
 		m.bodyInput.Focus()
+	case etParams:
+		if m.paramsField == 1 {
+			m.pathInput.Focus()
+		} else {
+			m.queryInput.Focus()
+		}
 	case etHeaders:
 		m.headersInput.Focus()
 	case etTests:
@@ -449,6 +560,8 @@ func (m EditorModel) focusContent() EditorModel {
 
 func (m EditorModel) blurContent() EditorModel {
 	m.bodyInput.Blur()
+	m.queryInput.Blur()
+	m.pathInput.Blur()
 	m.headersInput.Blur()
 	m.testsInput.Blur()
 	m.tokenInput.Blur()
@@ -462,11 +575,20 @@ func (m EditorModel) blurContent() EditorModel {
 func (m EditorModel) focusOptsField() EditorModel {
 	m.proxyInput.Blur()
 	m.perReqTimeout.Blur()
+	m.caBundleInput.Blur()
+	m.clientCertInput.Blur()
+	m.clientKeyInput.Blur()
 	switch m.optsField {
-	case 2:
-		m.proxyInput.Focus()
 	case 3:
+		m.proxyInput.Focus()
+	case 4:
 		m.perReqTimeout.Focus()
+	case 5:
+		m.caBundleInput.Focus()
+	case 6:
+		m.clientCertInput.Focus()
+	case 7:
+		m.clientKeyInput.Focus()
 	}
 	return m
 }
@@ -534,12 +656,22 @@ func (m EditorModel) View() string {
 			methodHint = hint.Render("  up/down space cycle  letter custom")
 		}
 	}
+	badge := methodBadge(mv)
+	if lipgloss.Width(badge)+lipgloss.Width(methodHint)+10 > m.width {
+		methodHint = ""
+	}
+	url := m.url
+	url.Width = max(1, m.width-lipgloss.Width(badge)-lipgloss.Width(methodHint)-2)
 	topRow := lipgloss.JoinHorizontal(lipgloss.Center,
-		methodBadge(mv), methodHint, "  ", m.url.View(),
+		badge, methodHint, "  ", url.View(),
 	)
 
 	focusedContent := m.inner == eiContent && m.focused
-	tabs := renderTabs(editorTabNames, int(m.tab), focusedContent)
+	tabNames := editorTabNames
+	if m.width < 40 {
+		tabNames = []string{"body", "par", "hdr", "auth", "test", "opt"}
+	}
+	tabs := renderTabs(tabNames, int(m.tab), focusedContent)
 
 	var content string
 	switch m.tab {
@@ -550,12 +682,31 @@ func (m EditorModel) View() string {
 			modeLabel = formMode.Render("form")
 		case "graphql":
 			modeLabel = formMode.Render("graphql")
+		case "multipart":
+			modeLabel = formMode.Render("multipart")
+		case "file":
+			modeLabel = formMode.Render("file")
 		default:
 			modeLabel = hint.Render("raw")
 		}
 		content = lipgloss.JoinVertical(lipgloss.Left,
 			modeLabel+hint.Render("  alt+m toggle"),
 			m.bodyInput.View(),
+		)
+	case etParams:
+		queryLabel := hint.Render("query params")
+		pathLabel := hint.Render("path params")
+		if m.paramsField == 0 && focusedContent {
+			queryLabel = tabActive.Render("query params")
+		}
+		if m.paramsField == 1 && focusedContent {
+			pathLabel = tabActive.Render("path params")
+		}
+		content = lipgloss.JoinVertical(lipgloss.Left,
+			queryLabel+hint.Render("  key=value, # disabled"),
+			m.queryInput.View(),
+			pathLabel+hint.Render("  :id placeholders in URL"),
+			m.pathInput.View(),
 		)
 	case etHeaders:
 		content = m.headersInput.View()
@@ -567,7 +718,11 @@ func (m EditorModel) View() string {
 		content = m.viewOpts()
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, topRow, "", tabs, content)
+	return lipgloss.JoinVertical(lipgloss.Left, topRow, mutedRule(m.ruleWidth()), tabs, content)
+}
+
+func (m EditorModel) ruleWidth() int {
+	return max(0, m.width-2)
 }
 
 func (m EditorModel) viewAuth() string {
@@ -620,12 +775,17 @@ func (m EditorModel) viewOpts() string {
 
 	skipVal := boolStr(m.skipVerify) + hint.Render("  <- ->")
 	redirVal := boolStr(m.disableRedirects) + hint.Render("  <- ->")
+	cookieVal := boolStr(m.useCookieJar) + hint.Render("  <- ->")
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		line("skip TLS verify", skipVal, m.optsField == 0),
 		line("disable redirects", redirVal, m.optsField == 1),
-		line("proxy URL", m.proxyInput.View(), m.optsField == 2),
-		line("timeout override", m.perReqTimeout.View()+hint.Render(" sec  (0 = global)"), m.optsField == 3),
+		line("cookie jar", cookieVal, m.optsField == 2),
+		line("proxy URL", m.proxyInput.View(), m.optsField == 3),
+		line("timeout override", m.perReqTimeout.View()+hint.Render(" sec  (0 = global)"), m.optsField == 4),
+		line("CA bundle", m.caBundleInput.View(), m.optsField == 5),
+		line("client cert", m.clientCertInput.View(), m.optsField == 6),
+		line("client key", m.clientKeyInput.View(), m.optsField == 7),
 	)
 }
 
@@ -653,11 +813,16 @@ func (m EditorModel) Blur() EditorModel {
 func (m EditorModel) setSize(w, h int) EditorModel {
 	m.width = w
 	m.height = h
-	inner := w - 4
+	inner := max(1, w)
 	m.url.Width = max(10, inner-16)
-	contentH := max(3, h-6)
+	contentH := max(3, h-7)
 	m.bodyInput.SetWidth(inner)
 	m.bodyInput.SetHeight(contentH)
+	paramH := max(2, (contentH-2)/2)
+	m.queryInput.SetWidth(inner)
+	m.queryInput.SetHeight(paramH)
+	m.pathInput.SetWidth(inner)
+	m.pathInput.SetHeight(max(2, contentH-paramH-2))
 	m.headersInput.SetWidth(inner)
 	m.headersInput.SetHeight(contentH)
 	m.testsInput.SetWidth(inner)
@@ -668,6 +833,9 @@ func (m EditorModel) setSize(w, h int) EditorModel {
 	m.passInput.Width = tokW
 	m.proxyInput.Width = max(20, inner-16)
 	m.perReqTimeout.Width = 8
+	m.caBundleInput.Width = max(20, inner-16)
+	m.clientCertInput.Width = max(20, inner-16)
+	m.clientKeyInput.Width = max(20, inner-16)
 	return m
 }
 
@@ -675,6 +843,8 @@ func (m EditorModel) Load(r *store.Request, collID string) EditorModel {
 	m.method.SetValue(r.Method)
 	m.url.SetValue(r.URL)
 	m.bodyInput.SetValue(r.Body.Raw)
+	m.queryInput.SetValue(formatParams(r.Query))
+	m.pathInput.SetValue(formatParams(r.Path))
 	m.bodyMode = r.Body.Mode
 	if m.bodyMode == "" {
 		m.bodyMode = "raw"
@@ -709,7 +879,11 @@ func (m EditorModel) Load(r *store.Request, collID string) EditorModel {
 
 	m.skipVerify = r.Options.SkipTLSVerify
 	m.disableRedirects = r.Options.DisableRedirects
+	m.useCookieJar = r.Options.UseCookieJar
 	m.proxyInput.SetValue(r.Options.ProxyURL)
+	m.caBundleInput.SetValue(r.Options.CABundlePath)
+	m.clientCertInput.SetValue(r.Options.ClientCertPath)
+	m.clientKeyInput.SetValue(r.Options.ClientKeyPath)
 	if r.Options.TimeoutSecs > 0 {
 		m.perReqTimeout.SetValue(fmt.Sprintf("%d", r.Options.TimeoutSecs))
 	} else {
@@ -766,13 +940,68 @@ func (m EditorModel) BuildRequest() store.Request {
 
 	r.Options.SkipTLSVerify = m.skipVerify
 	r.Options.DisableRedirects = m.disableRedirects
+	r.Options.UseCookieJar = m.useCookieJar
 	r.Options.ProxyURL = m.proxyInput.Value()
+	r.Options.CABundlePath = m.caBundleInput.Value()
+	r.Options.ClientCertPath = m.clientCertInput.Value()
+	r.Options.ClientKeyPath = m.clientKeyInput.Value()
+	r.Query = parseParams(m.queryInput.Value())
+	r.Path = parseParams(m.pathInput.Value())
 	if v := m.perReqTimeout.Value(); v != "" && v != "0" {
 		n := 0
 		fmt.Sscanf(v, "%d", &n)
 		r.Options.TimeoutSecs = n
 	}
 	return r
+}
+
+func parseParams(s string) []store.Param {
+	var out []store.Param
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		enabled := true
+		if strings.HasPrefix(line, "#") {
+			enabled = false
+			line = strings.TrimSpace(strings.TrimPrefix(line, "#"))
+		}
+		idx := strings.Index(line, "=")
+		if idx < 0 {
+			idx = strings.Index(line, ":")
+		}
+		if idx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		if key == "" {
+			continue
+		}
+		out = append(out, store.Param{
+			Key:     key,
+			Value:   strings.TrimSpace(line[idx+1:]),
+			Enabled: enabled,
+		})
+	}
+	return out
+}
+
+func formatParams(params []store.Param) string {
+	var b strings.Builder
+	for _, p := range params {
+		if p.Key == "" {
+			continue
+		}
+		if !p.Enabled {
+			b.WriteString("# ")
+		}
+		b.WriteString(p.Key)
+		b.WriteString("=")
+		b.WriteString(p.Value)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m EditorModel) TestsScript() string {

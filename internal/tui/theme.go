@@ -327,18 +327,19 @@ func applyTheme(t Theme) {
 	}
 
 	tabActive = lipgloss.NewStyle().
-		Foreground(colorAccent).
+		Foreground(t.BadgeFg).
+		Background(colorAccent).
 		Bold(true)
 
 	tabFocused = lipgloss.NewStyle().
-		Foreground(colorSubtle)
+		Foreground(colorAccent).
+		Background(colorBorder).
+		Bold(true)
 
 	tabInactive = lipgloss.NewStyle().
 		Foreground(colorMuted)
 
 	if colorBg != "" {
-		tabActive = tabActive.Background(colorBg)
-		tabFocused = tabFocused.Background(colorBg)
 		tabInactive = tabInactive.Background(colorBg)
 	}
 
@@ -380,6 +381,9 @@ func applyTheme(t Theme) {
 	formMode = lipgloss.NewStyle().
 		Foreground(colorAccent).
 		Bold(true)
+	if colorBg != "" {
+		formMode = formMode.Background(colorBg)
+	}
 }
 
 // WriteExampleTheme writes a starter theme JSON to dir/example.json if it

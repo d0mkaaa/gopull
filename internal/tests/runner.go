@@ -32,6 +32,8 @@ type RunResult struct {
 //	assert response_time < 500
 //	set TOKEN = $.data.access_token
 //	set ID    = $.id
+//	set NEXT  = header Location
+//	set CODE  = status
 func Run(script string, statusCode int, body []byte, rawHeaders string, elapsed time.Duration) RunResult {
 	result := RunResult{EnvUpdates: make(map[string]string)}
 	for _, raw := range strings.Split(script, "\n") {
@@ -44,7 +46,7 @@ func Run(script string, statusCode int, body []byte, rawHeaders string, elapsed 
 			ar := evalAssert(strings.TrimPrefix(line, "assert "), statusCode, body, rawHeaders, elapsed)
 			result.Assertions = append(result.Assertions, ar)
 		case strings.HasPrefix(line, "set "):
-			k, v := evalSet(strings.TrimPrefix(line, "set "), body)
+			k, v := evalSet(strings.TrimPrefix(line, "set "), statusCode, body, rawHeaders, elapsed)
 			if k != "" {
 				result.EnvUpdates[k] = v
 			}
@@ -183,13 +185,24 @@ func cmp(actual, op, expected string) bool {
 	return false
 }
 
-func evalSet(expr string, body []byte) (key, value string) {
+func evalSet(expr string, status int, body []byte, rawHeaders string, elapsed time.Duration) (key, value string) {
 	idx := strings.Index(expr, "=")
 	if idx < 0 {
 		return "", ""
 	}
 	key = strings.TrimSpace(expr[:idx])
 	path := strings.TrimSpace(expr[idx+1:])
+
+	switch {
+	case path == "status":
+		return key, strconv.Itoa(status)
+	case path == "response_time":
+		return key, strconv.FormatInt(elapsed.Milliseconds(), 10)
+	case path == "body":
+		return key, string(body)
+	case strings.HasPrefix(path, "header "):
+		return key, headerValue(rawHeaders, strings.TrimSpace(strings.TrimPrefix(path, "header ")))
+	}
 
 	if !strings.HasPrefix(path, "$") {
 		return key, path
@@ -204,6 +217,20 @@ func evalSet(expr string, body []byte) (key, value string) {
 		return key, ""
 	}
 	return key, fmt.Sprintf("%v", val)
+}
+
+func headerValue(rawHeaders, name string) string {
+	name = strings.Trim(name, `"'`)
+	for _, line := range strings.Split(rawHeaders, "\n") {
+		if idx := strings.Index(line, ":"); idx > 0 {
+			k := strings.TrimSpace(line[:idx])
+			v := strings.TrimSpace(line[idx+1:])
+			if strings.EqualFold(k, name) {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 func extractPath(data interface{}, path string) (interface{}, bool) {

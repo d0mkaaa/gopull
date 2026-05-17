@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -23,6 +26,10 @@ type Options struct {
 	SkipTLSVerify    bool
 	DisableRedirects bool
 	ProxyURL         string
+	UseCookieJar     bool
+	CABundlePath     string
+	ClientCertPath   string
+	ClientKeyPath    string
 }
 
 type Request struct {
@@ -33,6 +40,7 @@ type Request struct {
 	Auth    Auth
 	Env     map[string]string
 	Options Options
+	Jar     *cookiejar.Jar
 }
 
 type Response struct {
@@ -80,8 +88,31 @@ func Send(ctx context.Context, req Request) (*Response, error) {
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	tlsConfig := &tls.Config{}
 	if req.Options.SkipTLSVerify {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+		tlsConfig.InsecureSkipVerify = true //nolint:gosec
+	}
+	if req.Options.CABundlePath != "" {
+		pool, err := loadCertPool(substitute(req.Options.CABundlePath, req.Env))
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.RootCAs = pool
+	}
+	if req.Options.ClientCertPath != "" {
+		certPath := substitute(req.Options.ClientCertPath, req.Env)
+		keyPath := substitute(req.Options.ClientKeyPath, req.Env)
+		if keyPath == "" {
+			keyPath = certPath
+		}
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+	if req.Options.SkipTLSVerify || req.Options.CABundlePath != "" || req.Options.ClientCertPath != "" {
+		transport.TLSClientConfig = tlsConfig
 	}
 	if req.Options.ProxyURL != "" {
 		proxyURL, err := url.Parse(req.Options.ProxyURL)
@@ -93,6 +124,13 @@ func Send(ctx context.Context, req Request) (*Response, error) {
 	}
 
 	c := &http.Client{Transport: transport}
+	if req.Options.UseCookieJar {
+		if req.Jar != nil {
+			c.Jar = req.Jar
+		} else if jar, err := cookiejar.New(nil); err == nil {
+			c.Jar = jar
+		}
+	}
 	if req.Options.DisableRedirects {
 		c.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -129,6 +167,21 @@ func Send(ctx context.Context, req Request) (*Response, error) {
 		Elapsed:    time.Since(start),
 		StartTime:  start,
 	}, nil
+}
+
+func loadCertPool(path string) (*x509.CertPool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read CA bundle: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(data) {
+		return nil, fmt.Errorf("read CA bundle: no certificates found")
+	}
+	return pool, nil
 }
 
 func substitute(s string, env map[string]string) string {

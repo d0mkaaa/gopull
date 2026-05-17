@@ -45,9 +45,13 @@ go build -o gopull .
 - **Themes** - dark, light, nord, gruvbox - or create your own in JSON
 - **Curl import** - paste a curl command into the URL field and press tab
 - **Import/export** - Postman collections, `.http` files (VS Code REST Client), OpenAPI v2/v3
+- **CLI runner** - run local collections in scripts or CI with text, JSON, or JUnit reports
+- **Git-friendly files** - export collections as plain `.gopull` request files
 - **Search** - `/` to search the response body, `n`/`N` to jump between matches
 - **JSON tree** - `t` to collapse/expand JSON responses interactively
 - **Assertions** - write tests that run after every response; extract values into env vars with `set TOKEN = $.data.token`
+- **Multipart and files** - send multipart forms or a file as the request body
+- **Cookies and certs** - opt-in cookie jar, CA bundle, and client certificate paths
 - **Proxy** - per-request proxy URL or `HTTP_PROXY` / `HTTPS_PROXY` env vars
 - **Custom methods** - type any method (PROPFIND, REPORT, etc.) in the method field
 
@@ -59,17 +63,49 @@ go build -o gopull .
 gopull
 ```
 
+Run a collection from the shell:
+
+```sh
+gopull run ./my-api --env dev --report json
+gopull run collection.json --bail
+gopull run ./my-api --tags smoke --exclude-tags slow --report junit
+gopull run ./my-api --offline
+```
+
+Useful CLI flags:
+
+```text
+--env dev                 use a saved environment by name or id
+--env-file .env           merge variables from dotenv or JSON
+--env-var TOKEN=value     override a variable, repeatable
+--tags smoke              include only matching request tags
+--exclude-tags slow       skip matching request tags
+--iteration-count 3       run selected requests multiple times
+--report text|json|junit  choose output format
+--offline                 print built requests without sending
+```
+
 Three panels: sidebar (collections), editor (request builder), response. `tab` / `shift+tab` moves focus.
 
 ### Editor
 
-`[` and `]` cycle tabs: body, headers, auth, tests, opts.
+`[` and `]` cycle tabs: body, params, headers, auth, tests, opts.
 
 - Method: `space` / `up` / `down` cycle standard methods; press any letter to type a custom one
+- Params: query params append to the URL; path params fill `:id` placeholders
 - Headers: `Key: Value`, one per line. Prefix with `#` to disable a header
-- Body: raw by default, `alt+m` toggles form / GraphQL mode
+- Body: raw by default, `alt+m` toggles raw / form / GraphQL / multipart / file mode
 - Auth: bearer token or basic auth under the auth tab
 - `ctrl+r` sends
+
+Multipart body lines use:
+
+```text
+name=value
+file avatar=/path/to/avatar.png
+```
+
+File body mode reads the body from the path in the body field.
 
 ### Collections
 
@@ -123,6 +159,18 @@ set TOKEN = $.data.access_token
 - `.http` / `.rest` files (VS Code REST Client format)
 - OpenAPI v2 (Swagger) or v3 JSON files
 - OpenAPI spec URLs (`https://...`)
+- gopull plain-text collection directories
+
+Plain-text collections look like:
+
+```text
+my-api/
+  gopull.collection
+  list-users.gopull
+  create-user.gopull
+```
+
+Each `.gopull` request file uses simple sections like `[query]`, `[path]`, `[headers]`, `[body raw]`, and `[tests]`. Add `tags: smoke, auth` near the top of a request file to make CLI filters work.
 
 ### Command palette
 
@@ -142,6 +190,7 @@ set TOKEN = $.data.access_token
 | `alt+o` | Settings |
 | `ctrl+e` | Environment manager |
 | `alt+h` | History browser |
+| `alt+l` | Plugin manager |
 | `ctrl+i` | Import collection |
 | `ctrl+x` | Export collection (Postman JSON) |
 | `alt+j` | Format JSON body |
@@ -172,6 +221,7 @@ Custom bindings go in `~/.config/gopull/keybindings.json`.
   keybindings.json    key overrides
   themes/             custom theme files
   plugins/            experimental local hooks
+    disabled.json     local plugin enable/disable state
 ```
 
 `config.json` options:
@@ -221,6 +271,8 @@ v1 permissions:
 - `write_env` - write environment variables from `post_response`
 
 Manifests without `api_version` run in legacy mode for compatibility. New plugins should use `api_version: "v1"` and declare the narrowest permissions they need.
+
+Open the plugin manager with `alt+l` to inspect local plugins, review hooks and permissions, reload manifests, or enable/disable a plugin.
 
 ---
 
