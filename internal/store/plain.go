@@ -54,16 +54,27 @@ func LoadCollectionPath(path string) (*Collection, error) {
 }
 
 func LoadPlainCollection(dir string) (*Collection, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
 	c := &Collection{
-		ID:       filepath.Base(dir),
-		Name:     filepath.Base(dir),
+		ID:       filepath.Base(abs),
+		Name:     filepath.Base(abs),
 		Requests: map[string]*Request{},
 	}
+	var metaOrder []string
 	if meta, err := os.ReadFile(filepath.Join(dir, PlainCollectionFile)); err == nil {
 		for _, line := range strings.Split(string(meta), "\n") {
 			k, v, ok := splitPlainLine(line)
-			if ok && strings.EqualFold(k, "name") {
+			if !ok {
+				continue
+			}
+			switch strings.ToLower(k) {
+			case "name":
 				c.Name = v
+			case "order":
+				metaOrder = splitTags(v)
 			}
 		}
 	}
@@ -92,7 +103,27 @@ func LoadPlainCollection(dir string) (*Collection, error) {
 			r.Name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		}
 		c.Requests[r.ID] = r
-		c.Order = append(c.Order, r.ID)
+	}
+	if len(metaOrder) > 0 {
+		seen := map[string]bool{}
+		for _, id := range metaOrder {
+			if c.Requests[id] != nil {
+				c.Order = append(c.Order, id)
+				seen[id] = true
+			}
+		}
+		for _, path := range files {
+			rel, _ := filepath.Rel(dir, path)
+			id := filepath.ToSlash(strings.TrimSuffix(strings.TrimSuffix(rel, ".txt"), ".gopull"))
+			if !seen[id] {
+				c.Order = append(c.Order, id)
+			}
+		}
+	} else {
+		for _, path := range files {
+			rel, _ := filepath.Rel(dir, path)
+			c.Order = append(c.Order, filepath.ToSlash(strings.TrimSuffix(strings.TrimSuffix(rel, ".txt"), ".gopull")))
+		}
 	}
 	return c, nil
 }
@@ -122,6 +153,107 @@ func ExportPlainCollection(c *Collection, dir string) error {
 		}
 	}
 	return nil
+}
+
+func SavePlainCollection(c *Collection, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := SavePlainMeta(c, dir); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, id := range c.Order {
+		r := c.Requests[id]
+		if r == nil {
+			continue
+		}
+		if r.ID == "" {
+			r.ID = id
+		}
+		if r.ID == "" {
+			r.ID = uniquePlainID(c, safePlainName(r.Name))
+		}
+		seen[r.ID] = true
+		path, err := plainRequestPath(dir, r.ID)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := writeAtomic(path, []byte(formatPlainRequest(r))); err != nil {
+			return err
+		}
+	}
+	for id, r := range c.Requests {
+		if r == nil || seen[id] {
+			continue
+		}
+		r.ID = id
+		path, err := plainRequestPath(dir, id)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := writeAtomic(path, []byte(formatPlainRequest(r))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func SavePlainMeta(c *Collection, dir string) error {
+	var b strings.Builder
+	if c.Name != "" {
+		fmt.Fprintf(&b, "name: %s\n", c.Name)
+	}
+	var order []string
+	for _, id := range c.Order {
+		if c.Requests[id] != nil {
+			order = append(order, id)
+		}
+	}
+	if len(order) > 0 {
+		fmt.Fprintf(&b, "order: %s\n", strings.Join(order, ", "))
+	}
+	return writeAtomic(filepath.Join(dir, PlainCollectionFile), []byte(b.String()))
+}
+
+func InitPlainWorkspace(dir, name string, withEnv, force bool) error {
+	if name == "" {
+		name = filepath.Base(dir)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	files := map[string]string{
+		PlainCollectionFile: fmt.Sprintf("name: %s\norder: example\n", name),
+		"example.gopull":    "name: Example request\nmethod: GET\nurl: https://httpbin.org/get\n\n[headers]\nAccept: application/json\n\n[tests]\nassert status == 200\n",
+		".gitignore":        ".env\n*.local\n",
+	}
+	if withEnv {
+		files[".env.example"] = "BASE_URL=https://httpbin.org\nTOKEN=\n"
+	}
+	for rel, data := range files {
+		path := filepath.Join(dir, rel)
+		if !force {
+			if _, err := os.Stat(path); err == nil {
+				return fmt.Errorf("%s already exists; use --force to overwrite", path)
+			}
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func IsPlainCollectionDir(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, PlainCollectionFile))
+	return err == nil && !info.IsDir()
 }
 
 func parsePlainRequest(path string) (*Request, error) {
@@ -314,6 +446,46 @@ func uniquePlainName(base string, used map[string]int) string {
 		return base
 	}
 	return fmt.Sprintf("%s-%d", base, used[base])
+}
+
+func uniquePlainID(c *Collection, base string) string {
+	if base == "" {
+		base = "request"
+	}
+	id := base
+	for i := 2; c.Requests[id] != nil; i++ {
+		id = fmt.Sprintf("%s-%d", base, i)
+	}
+	return id
+}
+
+func plainRequestPath(dir, id string) (string, error) {
+	id = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(filepath.ToSlash(id), ".txt"), ".gopull"))
+	if id == "" {
+		return "", fmt.Errorf("empty request id")
+	}
+	if filepath.IsAbs(id) || strings.Contains(id, "..") {
+		return "", fmt.Errorf("invalid request id %q", id)
+	}
+	path := filepath.Join(dir, filepath.FromSlash(id)+".gopull")
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("request path escapes workspace")
+	}
+	return path, nil
+}
+
+func removeString(items []string, target string) []string {
+	out := items[:0]
+	for _, item := range items {
+		if item != target {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func parseBool(v string) bool {

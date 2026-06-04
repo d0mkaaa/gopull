@@ -12,7 +12,8 @@ import (
 )
 
 type Store struct {
-	dir string
+	dir          string
+	workspaceDir string
 }
 
 func New() (*Store, error) {
@@ -34,8 +35,26 @@ func NewAt(dir string) (*Store, error) {
 	return &Store{dir: dir}, nil
 }
 
+func NewWorkspace(dir string) (*Store, error) {
+	st, err := New()
+	if err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !IsPlainCollectionDir(abs) {
+		return nil, fmt.Errorf("%s is not a gopull workspace", dir)
+	}
+	st.workspaceDir = abs
+	return st, nil
+}
+
 // Dir returns the root config directory (e.g. ~/.config/gopull).
 func (s *Store) Dir() string { return s.dir }
+
+func (s *Store) WorkspaceDir() string { return s.workspaceDir }
 
 func configDir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -46,6 +65,13 @@ func configDir() (string, error) {
 }
 
 func (s *Store) LoadCollections() ([]*Collection, error) {
+	if s.workspaceDir != "" {
+		c, err := LoadPlainCollection(s.workspaceDir)
+		if err != nil {
+			return nil, fmt.Errorf("load workspace: %w", err)
+		}
+		return []*Collection{c}, nil
+	}
 	dir := filepath.Join(s.dir, "collections")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -87,6 +113,9 @@ func (s *Store) loadCollection(path string) (*Collection, error) {
 }
 
 func (s *Store) SaveCollection(c *Collection) error {
+	if s.workspaceDir != "" {
+		return SavePlainCollection(c, s.workspaceDir)
+	}
 	if c.ID == "" {
 		c.ID = newID()
 		c.CreatedAt = time.Now()
@@ -114,6 +143,14 @@ func (s *Store) EnsureDefaultCollection() (*Collection, error) {
 }
 
 func (s *Store) RenameCollection(collID, name string) error {
+	if s.workspaceDir != "" {
+		c, err := LoadPlainCollection(s.workspaceDir)
+		if err != nil {
+			return fmt.Errorf("load workspace: %w", err)
+		}
+		c.Name = name
+		return SavePlainCollection(c, s.workspaceDir)
+	}
 	path := filepath.Join(s.dir, "collections", collID+".json")
 	c, err := s.loadCollection(path)
 	if err != nil {
@@ -124,6 +161,18 @@ func (s *Store) RenameCollection(collID, name string) error {
 }
 
 func (s *Store) RenameRequest(collID, reqID, name string) error {
+	if s.workspaceDir != "" {
+		c, err := LoadPlainCollection(s.workspaceDir)
+		if err != nil {
+			return fmt.Errorf("load workspace: %w", err)
+		}
+		r, ok := c.Requests[reqID]
+		if !ok {
+			return fmt.Errorf("request not found")
+		}
+		r.Name = name
+		return SavePlainCollection(c, s.workspaceDir)
+	}
 	path := filepath.Join(s.dir, "collections", collID+".json")
 	c, err := s.loadCollection(path)
 	if err != nil {
@@ -138,6 +187,36 @@ func (s *Store) RenameRequest(collID, reqID, name string) error {
 }
 
 func (s *Store) DuplicateRequest(collID, reqID string) (*Request, error) {
+	if s.workspaceDir != "" {
+		c, err := LoadPlainCollection(s.workspaceDir)
+		if err != nil {
+			return nil, fmt.Errorf("load workspace: %w", err)
+		}
+		orig, ok := c.Requests[reqID]
+		if !ok {
+			return nil, fmt.Errorf("request not found")
+		}
+		data, err := json.Marshal(orig)
+		if err != nil {
+			return nil, err
+		}
+		var dup Request
+		if err := json.Unmarshal(data, &dup); err != nil {
+			return nil, err
+		}
+		dup.ID = uniquePlainID(c, safePlainName(dup.Name)+"-copy")
+		dup.Name = dup.Name + " (copy)"
+		c.Requests[dup.ID] = &dup
+		newOrder := make([]string, 0, len(c.Order)+1)
+		for _, id := range c.Order {
+			newOrder = append(newOrder, id)
+			if id == reqID {
+				newOrder = append(newOrder, dup.ID)
+			}
+		}
+		c.Order = newOrder
+		return &dup, SavePlainCollection(c, s.workspaceDir)
+	}
 	path := filepath.Join(s.dir, "collections", collID+".json")
 	c, err := s.loadCollection(path)
 	if err != nil {
@@ -170,6 +249,28 @@ func (s *Store) DuplicateRequest(collID, reqID string) (*Request, error) {
 }
 
 func (s *Store) MoveRequest(collID, reqID string, delta int) error {
+	if s.workspaceDir != "" {
+		c, err := LoadPlainCollection(s.workspaceDir)
+		if err != nil {
+			return fmt.Errorf("load workspace: %w", err)
+		}
+		idx := -1
+		for i, id := range c.Order {
+			if id == reqID {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil
+		}
+		newIdx := idx + delta
+		if newIdx < 0 || newIdx >= len(c.Order) {
+			return nil
+		}
+		c.Order[idx], c.Order[newIdx] = c.Order[newIdx], c.Order[idx]
+		return SavePlainCollection(c, s.workspaceDir)
+	}
 	path := filepath.Join(s.dir, "collections", collID+".json")
 	c, err := s.loadCollection(path)
 	if err != nil {
@@ -194,6 +295,21 @@ func (s *Store) MoveRequest(collID, reqID string, delta int) error {
 }
 
 func (s *Store) DeleteRequest(collectionID, requestID string) error {
+	if s.workspaceDir != "" {
+		path, err := plainRequestPath(s.workspaceDir, requestID)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("delete request: %w", err)
+		}
+		c, err := LoadPlainCollection(s.workspaceDir)
+		if err != nil {
+			return fmt.Errorf("load workspace: %w", err)
+		}
+		c.Order = removeString(c.Order, requestID)
+		return SavePlainMeta(c, s.workspaceDir)
+	}
 	path := filepath.Join(s.dir, "collections", collectionID+".json")
 	c, err := s.loadCollection(path)
 	if err != nil {
@@ -211,6 +327,23 @@ func (s *Store) DeleteRequest(collectionID, requestID string) error {
 }
 
 func (s *Store) SaveRequest(collectionID string, r *Request) error {
+	if s.workspaceDir != "" {
+		c, err := LoadPlainCollection(s.workspaceDir)
+		if err != nil {
+			return fmt.Errorf("load workspace: %w", err)
+		}
+		if r.ID == "" {
+			r.ID = uniquePlainID(c, safePlainName(r.Name))
+		}
+		if c.Requests == nil {
+			c.Requests = make(map[string]*Request)
+		}
+		if _, ok := c.Requests[r.ID]; !ok {
+			c.Order = append(c.Order, r.ID)
+		}
+		c.Requests[r.ID] = r
+		return SavePlainCollection(c, s.workspaceDir)
+	}
 	path := filepath.Join(s.dir, "collections", collectionID+".json")
 	c, err := s.loadCollection(path)
 	if err != nil {
@@ -346,6 +479,9 @@ func (s *Store) SaveState(st *AppState) error {
 }
 
 func (s *Store) DeleteCollection(collID string) error {
+	if s.workspaceDir != "" {
+		return fmt.Errorf("cannot delete the active workspace collection")
+	}
 	path := filepath.Join(s.dir, "collections", collID+".json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete collection: %w", err)

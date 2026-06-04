@@ -267,6 +267,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.envVars[k] = v
 			}
+			m.editor = m.editor.SetEnvVars(m.envVars)
 			if len(msg.pluginLogs) > 0 {
 				m.status = msg.pluginLogs[len(msg.pluginLogs)-1]
 				cmds = append(cmds, clearStatusCmd())
@@ -304,6 +305,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.envVars[k] = v
 			}
+			m.editor = m.editor.SetEnvVars(m.envVars)
 		}
 		return m, tea.Batch(cmds...)
 
@@ -370,6 +372,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeEnvName = ""
 			m.envVars = nil
 			m.envSecrets = nil
+			m.editor = m.editor.SetEnvVars(nil)
 		} else {
 			for _, e := range msg.envs {
 				if e.ID == msg.activeEnvID {
@@ -645,6 +648,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.NewRequest):
 			m.editor = newEditor(m.editor.width, m.editor.height)
+			m.editor = m.editor.SetEnvVars(m.envVars)
 			m.editor = m.editor.Focus()
 			m.focus = rfEditor
 			m.status = ""
@@ -659,7 +663,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case key.Matches(msg, keys.Settings):
-			m.settings = newSettings(m.theme, int(m.timeout.Seconds()), m.configDir)
+			m.settings = newSettings(m.theme, int(m.timeout.Seconds()), m.maxDisplayBytes, m.configDir, m.store.WorkspaceDir())
 			m.settingsVisible = true
 			return m, nil
 
@@ -926,7 +930,7 @@ func (m Model) viewHint() string {
 				midRaw = "up/down navigate   enter open   r run   n rename   d delete   tab next"
 			}
 		case rfEditor:
-			midRaw = "ctrl+r send   ctrl+s save   alt+n new   alt+j format   alt+m body mode   [/] tabs"
+			midRaw = "ctrl+r send   ctrl+s save   alt+/ complete   alt+j format   alt+m body mode   [/] tabs"
 		case rfResponse:
 			switch {
 			case m.response.InVisualMode():
@@ -985,6 +989,7 @@ func (m Model) execPaletteAction(msg paletteExecMsg) (tea.Model, tea.Cmd) {
 		return m.doSave()
 	case "new":
 		m.editor = newEditor(m.editor.width, m.editor.height)
+		m.editor = m.editor.SetEnvVars(m.envVars)
 		m.editor = m.editor.Focus()
 		m.focus = rfEditor
 		m.status = ""
@@ -997,7 +1002,7 @@ func (m Model) execPaletteAction(msg paletteExecMsg) (tea.Model, tea.Cmd) {
 		m.relayout()
 		return m, nil
 	case "settings":
-		m.settings = newSettings(m.theme, int(m.timeout.Seconds()), m.configDir)
+		m.settings = newSettings(m.theme, int(m.timeout.Seconds()), m.maxDisplayBytes, m.configDir, m.store.WorkspaceDir())
 		m.settingsVisible = true
 		return m, nil
 	case "env":
@@ -1146,6 +1151,7 @@ func (m Model) applyEnv(e *store.Environment) Model {
 	resolved := store.ResolveEnvironment(e)
 	m.envVars = resolved.Values
 	m.envSecrets = resolved.SecretKeys
+	m.editor = m.editor.SetEnvVars(m.envVars)
 	return m
 }
 
@@ -1180,8 +1186,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.settingsVisible = false
 		secs := m.settings.TimeoutValue()
+		maxDisplayBytes := m.settings.MaxDisplayBytesValue()
 		m.timeout = time.Duration(secs) * time.Second
-		return m, saveSettingsCmd(m.store, m.theme, secs)
+		m.maxDisplayBytes = maxDisplayBytes
+		return m, saveSettingsCmd(m.store, m.theme, secs, maxDisplayBytes)
 	}
 	var cmd tea.Cmd
 	m.settings, cmd = m.settings.Update(msg)
@@ -1724,7 +1732,7 @@ func saveThemeCmd(st *store.Store, theme string) tea.Cmd {
 	}
 }
 
-func saveSettingsCmd(st *store.Store, theme string, timeoutSecs int) tea.Cmd {
+func saveSettingsCmd(st *store.Store, theme string, timeoutSecs, maxDisplayBytes int) tea.Cmd {
 	return func() tea.Msg {
 		cfg, _ := st.LoadConfig()
 		if cfg == nil {
@@ -1732,6 +1740,7 @@ func saveSettingsCmd(st *store.Store, theme string, timeoutSecs int) tea.Cmd {
 		}
 		cfg.Theme = theme
 		cfg.TimeoutSecs = timeoutSecs
+		cfg.MaxDisplayBytes = maxDisplayBytes
 		_ = st.SaveConfig(cfg)
 		return nil
 	}

@@ -18,6 +18,7 @@ type settingsFocus int
 const (
 	sfThemes settingsFocus = iota
 	sfTimeout
+	sfMaxDisplay
 	sfThemeEditor
 )
 
@@ -164,22 +165,32 @@ func (e themeEditorModel) toThemeJSON() themeJSON {
 }
 
 type SettingsModel struct {
-	themes       []themeOption
-	themeIdx     int
-	timeoutInput textinput.Model
-	focus        settingsFocus
-	timeoutSecs  int
-	configDir    string
+	themes          []themeOption
+	themeIdx        int
+	timeoutInput    textinput.Model
+	maxDisplayInput textinput.Model
+	focus           settingsFocus
+	timeoutSecs     int
+	maxDisplayBytes int
+	configDir       string
+	workspaceDir    string
 
 	themeEditor themeEditorModel
 }
 
-func newSettings(currentTheme string, timeoutSecs int, configDir string) SettingsModel {
+func newSettings(currentTheme string, timeoutSecs, maxDisplayBytes int, configDir, workspaceDir string) SettingsModel {
 	ti := textinput.New()
 	ti.Placeholder = "30"
 	ti.CharLimit = 5
 	ti.Width = 6
 	ti.SetValue(strconv.Itoa(timeoutSecs))
+
+	mb := bytesToMB(maxDisplayBytes)
+	mi := textinput.New()
+	mi.Placeholder = "5"
+	mi.CharLimit = 5
+	mi.Width = 6
+	mi.SetValue(strconv.Itoa(mb))
 
 	themes := AllThemeOptions()
 
@@ -192,12 +203,15 @@ func newSettings(currentTheme string, timeoutSecs int, configDir string) Setting
 	}
 
 	return SettingsModel{
-		themes:       themes,
-		themeIdx:     idx,
-		timeoutInput: ti,
-		focus:        sfThemes,
-		timeoutSecs:  timeoutSecs,
-		configDir:    configDir,
+		themes:          themes,
+		themeIdx:        idx,
+		timeoutInput:    ti,
+		maxDisplayInput: mi,
+		focus:           sfThemes,
+		timeoutSecs:     timeoutSecs,
+		maxDisplayBytes: maxDisplayBytes,
+		configDir:       configDir,
+		workspaceDir:    workspaceDir,
 	}
 }
 
@@ -212,7 +226,39 @@ func (m SettingsModel) overlayWidth() int {
 	if m.focus == sfThemeEditor {
 		return 64
 	}
-	return 52
+	return 64
+}
+
+func (m SettingsModel) nextFocus() SettingsModel {
+	switch m.focus {
+	case sfThemes:
+		m.focus = sfTimeout
+		m.timeoutInput.Focus()
+	case sfTimeout:
+		m.timeoutInput.Blur()
+		m.focus = sfMaxDisplay
+		m.maxDisplayInput.Focus()
+	case sfMaxDisplay:
+		m.maxDisplayInput.Blur()
+		m.focus = sfThemes
+	}
+	return m
+}
+
+func (m SettingsModel) prevFocus() SettingsModel {
+	switch m.focus {
+	case sfThemes:
+		m.focus = sfMaxDisplay
+		m.maxDisplayInput.Focus()
+	case sfTimeout:
+		m.timeoutInput.Blur()
+		m.focus = sfThemes
+	case sfMaxDisplay:
+		m.maxDisplayInput.Blur()
+		m.focus = sfTimeout
+		m.timeoutInput.Focus()
+	}
+	return m
 }
 
 func (m SettingsModel) Update(msg tea.Msg) (SettingsModel, tea.Cmd) {
@@ -240,29 +286,28 @@ func (m SettingsModel) Update(msg tea.Msg) (SettingsModel, tea.Cmd) {
 			m.timeoutInput, cmd = m.timeoutInput.Update(msg)
 			return m, cmd
 		}
+		if m.focus == sfMaxDisplay {
+			var cmd tea.Cmd
+			m.maxDisplayInput, cmd = m.maxDisplayInput.Update(msg)
+			return m, cmd
+		}
 		return m, nil
 	}
 
 	switch km.Type {
 	case tea.KeyTab:
-		if m.focus == sfThemes {
-			m.focus = sfTimeout
-			m.timeoutInput.Focus()
+		m = m.nextFocus()
+		if m.focus == sfTimeout || m.focus == sfMaxDisplay {
 			return m, textinput.Blink
 		}
-		m.focus = sfThemes
-		m.timeoutInput.Blur()
 		return m, nil
 
 	case tea.KeyShiftTab:
-		if m.focus == sfTimeout {
-			m.focus = sfThemes
-			m.timeoutInput.Blur()
-			return m, nil
+		m = m.prevFocus()
+		if m.focus == sfTimeout || m.focus == sfMaxDisplay {
+			return m, textinput.Blink
 		}
-		m.focus = sfTimeout
-		m.timeoutInput.Focus()
-		return m, textinput.Blink
+		return m, nil
 	}
 
 	if m.focus == sfThemes {
@@ -289,6 +334,10 @@ func (m SettingsModel) Update(msg tea.Msg) (SettingsModel, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	if m.focus == sfMaxDisplay {
+		m.maxDisplayInput, cmd = m.maxDisplayInput.Update(msg)
+		return m, cmd
+	}
 	m.timeoutInput, cmd = m.timeoutInput.Update(msg)
 	return m, cmd
 }
@@ -307,6 +356,14 @@ func (m SettingsModel) TimeoutValue() int {
 		return m.timeoutSecs
 	}
 	return v
+}
+
+func (m SettingsModel) MaxDisplayBytesValue() int {
+	v, err := strconv.Atoi(strings.TrimSpace(m.maxDisplayInput.Value()))
+	if err != nil || v <= 0 {
+		return m.maxDisplayBytes
+	}
+	return v * 1024 * 1024
 }
 
 func (m SettingsModel) SelectedTheme() string {
@@ -359,15 +416,41 @@ func (m SettingsModel) View() string {
 	sb.WriteString("  " + m.timeoutInput.View() + sub.Render(" seconds"))
 	sb.WriteString("\n\n")
 
+	focused = m.focus == sfMaxDisplay
+	sb.WriteString(sectionLabel("max response display", focused))
+	sb.WriteString("\n")
+	sb.WriteString("  " + m.maxDisplayInput.View() + sub.Render(" MB before body is hidden"))
+	sb.WriteString("\n\n")
+
+	sb.WriteString(sectionLabel("workspace", false))
+	sb.WriteString("\n")
+	if m.workspaceDir != "" {
+		sb.WriteString("  " + muted.Render(clipText(m.workspaceDir, 54)))
+	} else {
+		sb.WriteString("  " + muted.Render("config store"))
+	}
+	sb.WriteString("\n\n")
+
 	var hintStr string
 	if m.focus == sfThemes {
-		hintStr = "up/down pick   n new theme   tab -> timeout   esc close"
+		hintStr = "up/down pick   n new theme   tab next   esc save"
 	} else {
-		hintStr = "tab -> theme   esc close"
+		hintStr = "tab next   shift+tab previous   esc save"
 	}
 	sb.WriteString(hint.Render(hintStr))
 
 	return sb.String()
+}
+
+func bytesToMB(bytes int) int {
+	if bytes <= 0 {
+		return 5
+	}
+	mb := bytes / (1024 * 1024)
+	if mb <= 0 {
+		return 1
+	}
+	return mb
 }
 
 func saveCustomThemeFileCmd(configDir string, tj themeJSON) tea.Cmd {

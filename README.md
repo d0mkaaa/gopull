@@ -61,11 +61,14 @@ go build -o gopull .
 
 ```sh
 gopull
+gopull ./api-requests
 ```
 
 Run a collection from the shell:
 
 ```sh
+gopull init ./my-api --env
+gopull lint ./my-api
 gopull run ./my-api --env dev --report json
 gopull run collection.json --bail
 gopull run ./my-api --tags smoke --exclude-tags slow --report junit
@@ -96,6 +99,7 @@ Three panels: sidebar (collections), editor (request builder), response. `tab` /
 - Headers: `Key: Value`, one per line. Prefix with `#` to disable a header
 - Body: raw by default, `alt+m` toggles raw / form / GraphQL / multipart / file mode
 - Auth: bearer token or basic auth under the auth tab
+- Completion: `alt+/` completes `{{env}}` variables, header names, content types, and missing path params from the URL
 - `ctrl+r` sends
 
 Multipart body lines use:
@@ -133,7 +137,11 @@ secret TOKEN=value
 
 ### Response
 
-`j`/`k` scroll, `/` search, `t` JSON tree view, `y` copy body, `w` save to file, `D` diff against history.
+Responses open on a preview tab with status, timing, size, header count, cookies, and a content-aware body summary. JSON responses show top-level keys and shapes, HTML responses show title/headings/text, XML responses show root/children, and plain text shows the first readable lines.
+
+`[` / `]` switches response tabs: preview, body, headers, and tests when assertions ran.
+
+`j`/`k` scroll, `/` search, `t` JSON tree view from the body tab, `y` copy body, `w` save to file, `D` diff against history.
 
 In tree view: `space` collapse/expand, `c` collapse all, `e` expand all, `{`/`}` jump between siblings.
 
@@ -172,6 +180,21 @@ my-api/
 
 Each `.gopull` request file uses simple sections like `[query]`, `[path]`, `[headers]`, `[body raw]`, and `[tests]`. Add `tags: smoke, auth` near the top of a request file to make CLI filters work.
 
+Open a plain collection directly with `gopull ./my-api`. In workspace mode, saves write back to the `.gopull` files instead of copying the collection into the config store.
+
+Scaffold a new plain collection:
+
+```sh
+gopull init ./my-api --env
+```
+
+Validate a collection before committing:
+
+```sh
+gopull lint ./my-api
+gopull lint ./my-api --format json
+```
+
 ### Command palette
 
 `alt+p` - fuzzy search over all actions and saved requests.
@@ -195,6 +218,7 @@ Each `.gopull` request file uses simple sections like `[query]`, `[path]`, `[hea
 | `ctrl+x` | Export collection (Postman JSON) |
 | `alt+j` | Format JSON body |
 | `alt+m` | Toggle body mode |
+| `alt+/` | Complete current editor field |
 | `alt+c` | Copy request as curl |
 | `alt+e` | Open body in external editor |
 | `[` / `]` | Switch editor tabs |
@@ -238,7 +262,7 @@ Custom bindings go in `~/.config/gopull/keybindings.json`.
 
 ## Themes
 
-Built-in: `dark` (catppuccin mocha), `light` (catppuccin latte), `nord`, `gruvbox`. Switch in settings (`alt+o`), previews live.
+Built-in: `dark` (catppuccin mocha), `light` (catppuccin latte), `nord`, `gruvbox`. Settings (`alt+o`) lets you switch themes, change the default timeout, set the max response body display size, and confirm whether you are using the config store or a plain `.gopull` workspace.
 
 Drop a JSON file in `~/.config/gopull/themes/` to add your own - a starter template is written there on first run.
 

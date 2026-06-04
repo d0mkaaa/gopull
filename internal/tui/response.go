@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,7 +26,8 @@ import (
 type respTab int
 
 const (
-	rtBody respTab = iota
+	rtPreview respTab = iota
+	rtBody
 	rtHeaders
 	rtTests
 )
@@ -164,7 +167,7 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 
 		switch {
 		case key.Matches(km, keys.Search):
-			if !m.visualMode && !m.treeView {
+			if !m.visualMode && !m.treeView && m.tab != rtTests {
 				m.searching = true
 				m.searchInput.Focus()
 				return m, textinput.Blink
@@ -212,7 +215,7 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 			m = m.syncViewportToCursor()
 			return m, nil
 
-		case km.String() == "v" && !m.treeView:
+		case km.String() == "v" && !m.treeView && (m.tab == rtBody || m.tab == rtHeaders):
 			m.visualMode = !m.visualMode
 			if m.visualMode {
 				m.visualAnchor = m.viewport.YOffset
@@ -314,6 +317,8 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 				m = m.refreshViewport()
 			} else {
 				switch m.tab {
+				case rtPreview:
+					content = m.result.plainBody
 				case rtBody:
 					content = m.result.plainBody
 				case rtHeaders:
@@ -328,6 +333,8 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 		case km.String() == "w" && m.result != nil && m.tab != rtTests:
 			var content string
 			switch m.tab {
+			case rtPreview:
+				content = m.result.plainBody
 			case rtBody:
 				content = m.result.plainBody
 			case rtHeaders:
@@ -342,12 +349,14 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 			}
 
 		case key.Matches(km, keys.TabLeft):
-			m.visualMode = false
-			m = m.setTab(rtBody)
+			if m.tab > rtPreview {
+				m.visualMode = false
+				m = m.setTab(m.tab - 1)
+			}
 			return m, nil
 
 		case key.Matches(km, keys.TabRight):
-			if m.tab < rtTests {
+			if m.tab < m.lastTab() {
 				m.visualMode = false
 				m = m.setTab(m.tab + 1)
 			}
@@ -371,6 +380,12 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 }
 
 func (m ResponseModel) setTab(t respTab) ResponseModel {
+	if t < rtPreview {
+		t = rtPreview
+	}
+	if last := m.lastTab(); t > last {
+		t = last
+	}
 	m.tab = t
 	m.query = ""
 	m.searching = false
@@ -378,6 +393,13 @@ func (m ResponseModel) setTab(t respTab) ResponseModel {
 	m.matchPositions = nil
 	m.matchIndex = 0
 	return m.refreshViewport()
+}
+
+func (m ResponseModel) lastTab() respTab {
+	if len(m.testRows) > 0 {
+		return rtTests
+	}
+	return rtHeaders
 }
 
 func (m ResponseModel) View() string {
@@ -414,7 +436,7 @@ func (m ResponseModel) View() string {
 			bodyLabel = "body - html"
 		}
 	}
-	tabNames := []string{bodyLabel, "headers"}
+	tabNames := []string{"preview", bodyLabel, "headers"}
 	if len(m.testRows) > 0 {
 		pass, total := 0, 0
 		for _, r := range m.testRows {
@@ -516,7 +538,7 @@ func (m ResponseModel) SetLoading(v bool) ResponseModel {
 		m.result = nil
 		m.err = nil
 		m.testRows = nil
-		m.tab = rtBody
+		m.tab = rtPreview
 		m.streaming = false
 		m.streamLines = nil
 		m.visualMode = false
@@ -546,7 +568,7 @@ func (m ResponseModel) SetResult(r *result) ResponseModel {
 	m.tooLarge = false
 	m.result = r
 	m.err = nil
-	m.tab = rtBody
+	m.tab = rtPreview
 	m.query = ""
 	m.matchPositions = nil
 	m.matchIndex = 0
@@ -567,7 +589,7 @@ func (m ResponseModel) SetTooLarge(r *result) ResponseModel {
 	m.tooLarge = true
 	m.result = r
 	m.err = nil
-	m.tab = rtBody
+	m.tab = rtPreview
 	m.query = ""
 	m.matchPositions = nil
 	m.matchIndex = 0
@@ -594,7 +616,10 @@ func (m ResponseModel) SetError(err error) ResponseModel {
 
 func (m ResponseModel) SetTestRows(rows []TestRow) ResponseModel {
 	m.testRows = rows
-	return m
+	if m.tab > m.lastTab() {
+		m.tab = m.lastTab()
+	}
+	return m.refreshViewport()
 }
 
 func (m ResponseModel) refreshViewport() ResponseModel {
@@ -607,6 +632,12 @@ func (m ResponseModel) refreshViewport() ResponseModel {
 		return m
 	}
 	switch m.tab {
+	case rtPreview:
+		if m.query != "" {
+			m = m.applySearch(m.query)
+		} else {
+			m.viewport.SetContent(m.previewView())
+		}
 	case rtBody:
 		if m.result.binary {
 			m.viewport.SetContent(m.binaryView())
@@ -627,6 +658,370 @@ func (m ResponseModel) refreshViewport() ResponseModel {
 		m.viewport.SetContent(m.renderTestRows())
 	}
 	return m
+}
+
+func (m ResponseModel) previewView() string {
+	if m.result == nil {
+		return ""
+	}
+	return strings.Join(m.previewLines(false), "\n")
+}
+
+func (m ResponseModel) previewPlain() string {
+	if m.result == nil {
+		return ""
+	}
+	return strings.Join(m.previewLines(true), "\n")
+}
+
+func (m ResponseModel) previewLines(plain bool) []string {
+	r := m.result
+	width := max(20, m.viewport.Width)
+	line := func(label, value string) string {
+		return previewKV(label, value, width, plain)
+	}
+
+	kind := responseKind(r)
+	if r.binary {
+		kind = "binary"
+	}
+	rows := []string{
+		previewTitle("response preview", plain),
+		line("status", r.status),
+		line("elapsed", r.elapsed.Round(time.Millisecond).String()),
+		line("size", formatSize(r.size)),
+		line("type", defaultString(r.contentType, kind)),
+		line("headers", fmt.Sprintf("%d", headerLineCount(r.rawHeaders))),
+	}
+	if n := setCookieCount(r.rawHeaders); n > 0 {
+		rows = append(rows, line("set-cookie", fmt.Sprintf("%d", n)))
+	}
+	rows = append(rows, "")
+
+	if r.binary {
+		rows = append(rows,
+			previewTitle("body", plain),
+			line("kind", "binary "+formatSize(r.size)),
+			line("actions", "w save to file, y copy raw bytes"),
+		)
+		return rows
+	}
+
+	rows = append(rows, bodyPreviewLines(r, width, plain)...)
+	return rows
+}
+
+func bodyPreviewLines(r *result, width int, plain bool) []string {
+	body := strings.TrimSpace(r.plainBody)
+	if body == "" {
+		return []string{previewTitle("body", plain), previewKV("kind", "empty", width, plain)}
+	}
+	if lines, ok := jsonPreviewLines(body, width, plain); ok {
+		return lines
+	}
+	ct := strings.ToLower(r.contentType)
+	switch {
+	case strings.Contains(ct, "html") || looksLikeHTML(body):
+		return htmlPreviewLines(body, width, plain)
+	case isXMLContentType(ct) || looksLikeXML(body):
+		return xmlPreviewLines(body, width, plain)
+	default:
+		return textPreviewLines(body, width, plain)
+	}
+}
+
+func jsonPreviewLines(body string, width int, plain bool) ([]string, bool) {
+	var v any
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return nil, false
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, false
+	}
+
+	rows := []string{previewTitle("json", plain)}
+	switch x := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		rows = append(rows, previewKV("shape", fmt.Sprintf("object, %d keys", len(keys)), width, plain))
+		for _, k := range firstStrings(keys, 10) {
+			rows = append(rows, previewBullet(k, jsonValueSummary(x[k]), width, plain))
+		}
+		if len(keys) > 10 {
+			rows = append(rows, previewBullet("...", fmt.Sprintf("%d more keys", len(keys)-10), width, plain))
+		}
+	case []any:
+		rows = append(rows, previewKV("shape", fmt.Sprintf("array, %d items", len(x)), width, plain))
+		for i, item := range firstAny(x, 8) {
+			rows = append(rows, previewBullet(fmt.Sprintf("[%d]", i), jsonValueSummary(item), width, plain))
+		}
+		if len(x) > 8 {
+			rows = append(rows, previewBullet("...", fmt.Sprintf("%d more items", len(x)-8), width, plain))
+		}
+	default:
+		rows = append(rows, previewKV("value", jsonValueSummary(x), width, plain))
+	}
+	return rows, true
+}
+
+func htmlPreviewLines(body string, width int, plain bool) []string {
+	title := firstHTMLMatch(body, `(?is)<title[^>]*>(.*?)</title>`)
+	h1 := firstHTMLMatch(body, `(?is)<h1[^>]*>(.*?)</h1>`)
+	h2 := firstHTMLMatch(body, `(?is)<h2[^>]*>(.*?)</h2>`)
+	text := stripHTML(body)
+	rows := []string{previewTitle("html", plain)}
+	if title != "" {
+		rows = append(rows, previewKV("title", title, width, plain))
+	}
+	if h1 != "" {
+		rows = append(rows, previewKV("h1", h1, width, plain))
+	}
+	if h2 != "" {
+		rows = append(rows, previewKV("h2", h2, width, plain))
+	}
+	if text != "" {
+		rows = append(rows, "", previewTitle("text", plain))
+		for _, line := range previewTextLines(text, 5) {
+			rows = append(rows, previewText(line, width, plain))
+		}
+	}
+	return rows
+}
+
+func xmlPreviewLines(body string, width int, plain bool) []string {
+	dec := xml.NewDecoder(strings.NewReader(body))
+	root := ""
+	children := make(map[string]bool)
+	var textParts []string
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return textPreviewLines(body, width, plain)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			depth++
+			if root == "" {
+				root = t.Name.Local
+			} else if depth == 2 {
+				children[t.Name.Local] = true
+			}
+		case xml.EndElement:
+			if depth > 0 {
+				depth--
+			}
+		case xml.CharData:
+			if s := compactSpace(string(t)); s != "" {
+				textParts = append(textParts, s)
+			}
+		}
+	}
+	rows := []string{previewTitle("xml", plain)}
+	if root != "" {
+		rows = append(rows, previewKV("root", root, width, plain))
+	}
+	if len(children) > 0 {
+		names := make([]string, 0, len(children))
+		for name := range children {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		rows = append(rows, previewKV("children", strings.Join(firstStrings(names, 8), ", "), width, plain))
+	}
+	if len(textParts) > 0 {
+		rows = append(rows, "", previewTitle("text", plain))
+		for _, line := range previewTextLines(strings.Join(textParts, " "), 4) {
+			rows = append(rows, previewText(line, width, plain))
+		}
+	}
+	return rows
+}
+
+func textPreviewLines(body string, width int, plain bool) []string {
+	rows := []string{previewTitle("text", plain)}
+	lines := strings.Split(body, "\n")
+	rows = append(rows, previewKV("lines", fmt.Sprintf("%d", len(lines)), width, plain))
+	rows = append(rows, "")
+	for _, line := range previewTextLines(body, 8) {
+		rows = append(rows, previewText(line, width, plain))
+	}
+	return rows
+}
+
+func previewTitle(s string, plain bool) string {
+	if plain {
+		return s
+	}
+	return lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(s)
+}
+
+func previewKV(label, value string, width int, plain bool) string {
+	label = clipText(label, 12)
+	value = compactSpace(value)
+	if value == "" {
+		value = "-"
+	}
+	if plain {
+		return fmt.Sprintf("%-12s %s", label, clipText(value, max(1, width-13)))
+	}
+	return hint.Render(fmt.Sprintf("%-12s", label)) + " " + clipText(value, max(1, width-13))
+}
+
+func previewBullet(label, value string, width int, plain bool) string {
+	label = clipText(label, 20)
+	value = compactSpace(value)
+	if plain {
+		return "  " + clipText(label, 20) + "  " + clipText(value, max(1, width-24))
+	}
+	return "  " + clipText(label, 20) + themedSpace(max(1, 22-lipgloss.Width(label))) + hint.Render(clipText(value, max(1, width-24)))
+}
+
+func previewText(line string, width int, plain bool) string {
+	line = compactSpace(line)
+	if plain {
+		return clipText(line, width)
+	}
+	return hint.Render(clipText(line, width))
+}
+
+func responseKind(r *result) string {
+	ct := strings.ToLower(r.contentType)
+	switch {
+	case strings.Contains(ct, "json"):
+		return "json"
+	case strings.Contains(ct, "html"):
+		return "html"
+	case strings.Contains(ct, "xml"):
+		return "xml"
+	case strings.HasPrefix(ct, "text/"):
+		return "text"
+	case ct != "":
+		return ct
+	default:
+		return "text"
+	}
+}
+
+func defaultString(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
+}
+
+func headerLineCount(raw string) int {
+	count := 0
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func setCookieCount(raw string) int {
+	count := 0
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "set-cookie:") {
+			count++
+		}
+	}
+	return count
+}
+
+func looksLikeHTML(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.HasPrefix(s, "<!doctype html") || strings.HasPrefix(s, "<html") || strings.Contains(s, "<body")
+}
+
+func looksLikeXML(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "<?xml") || (strings.HasPrefix(s, "<") && strings.Contains(s, ">"))
+}
+
+func firstHTMLMatch(body, pattern string) string {
+	re := regexp.MustCompile(pattern)
+	match := re.FindStringSubmatch(body)
+	if len(match) < 2 {
+		return ""
+	}
+	return compactSpace(stripHTML(match[1]))
+}
+
+func stripHTML(s string) string {
+	s = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`).ReplaceAllString(s, " ")
+	s = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`).ReplaceAllString(s, " ")
+	s = regexp.MustCompile(`(?s)<[^>]+>`).ReplaceAllString(s, " ")
+	return compactSpace(html.UnescapeString(s))
+}
+
+func compactSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func jsonValueSummary(v any) string {
+	switch x := v.(type) {
+	case map[string]any:
+		return fmt.Sprintf("object, %d keys", len(x))
+	case []any:
+		if len(x) == 0 {
+			return "array, 0 items"
+		}
+		return fmt.Sprintf("array, %d items, first %s", len(x), jsonValueSummary(x[0]))
+	case string:
+		return "string " + fmt.Sprintf("%q", clipText(x, 48))
+	case json.Number:
+		return "number " + x.String()
+	case bool:
+		return fmt.Sprintf("bool %v", x)
+	case nil:
+		return "null"
+	default:
+		return fmt.Sprintf("%T", x)
+	}
+}
+
+func firstStrings(values []string, n int) []string {
+	if len(values) <= n {
+		return values
+	}
+	return values[:n]
+}
+
+func firstAny(values []any, n int) []any {
+	if len(values) <= n {
+		return values
+	}
+	return values[:n]
+}
+
+func previewTextLines(body string, maxLines int) []string {
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		line = compactSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+		if len(out) == maxLines {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return []string{"empty body"}
+	}
+	return out
 }
 
 func (m ResponseModel) binaryView() string {
@@ -792,6 +1187,8 @@ func (m ResponseModel) applySearch(query string) ResponseModel {
 
 	source := ""
 	switch m.tab {
+	case rtPreview:
+		source = m.previewPlain()
 	case rtBody:
 		source = wrapText(m.result.plainBody, m.viewport.Width)
 	case rtHeaders:
@@ -835,6 +1232,8 @@ func (m ResponseModel) refreshViewportNoSearch() ResponseModel {
 		return m
 	}
 	switch m.tab {
+	case rtPreview:
+		m.viewport.SetContent(m.previewView())
 	case rtBody:
 		m.viewport.SetContent(wrapText(m.result.body, m.viewport.Width))
 	case rtHeaders:

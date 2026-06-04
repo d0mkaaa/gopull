@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -45,6 +47,32 @@ const (
 	eiContent
 )
 
+type editorCompletion struct {
+	insert string
+}
+
+var headerCompletions = []string{
+	"Content-Type",
+	"Authorization",
+	"Accept",
+	"User-Agent",
+	"Cache-Control",
+	"If-None-Match",
+	"If-Match",
+	"X-Request-ID",
+	"X-API-Key",
+}
+
+var contentTypeCompletions = []string{
+	"application/json",
+	"application/x-www-form-urlencoded",
+	"multipart/form-data",
+	"text/plain",
+	"text/html",
+	"application/xml",
+	"application/octet-stream",
+}
+
 type EditorModel struct {
 	method       textinput.Model
 	url          textinput.Model
@@ -56,6 +84,7 @@ type EditorModel struct {
 	tokenInput   textinput.Model
 	userInput    textinput.Model
 	passInput    textinput.Model
+	envKeys      []string
 
 	tab         editorTab
 	bodyMode    string // raw, form, graphql, multipart, file
@@ -262,6 +291,22 @@ func (m EditorModel) RefreshTheme() EditorModel {
 	return m
 }
 
+func (m EditorModel) SetEnvVars(vars map[string]string) EditorModel {
+	if len(vars) == 0 {
+		m.envKeys = nil
+		return m
+	}
+	envKeys := make([]string, 0, len(vars))
+	for k := range vars {
+		if strings.TrimSpace(k) != "" {
+			envKeys = append(envKeys, k)
+		}
+	}
+	sort.Strings(envKeys)
+	m.envKeys = envKeys
+	return m
+}
+
 func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 	if !m.focused {
 		return m, nil
@@ -269,6 +314,11 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 
 	if km, ok := msg.(tea.KeyMsg); ok {
 		switch {
+		case key.Matches(km, keys.Complete):
+			if next, ok := m.applyCompletion(); ok {
+				return next, nil
+			}
+			return m, nil
 		case key.Matches(km, keys.Next):
 			return m.tabForward()
 		case key.Matches(km, keys.Prev):
@@ -625,6 +675,279 @@ func (m *EditorModel) updateAuthInput(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
+func (m EditorModel) applyCompletion() (EditorModel, bool) {
+	suggestions := m.completionSuggestions()
+	if len(suggestions) == 0 || suggestions[0].insert == "" {
+		return m, false
+	}
+	insert := suggestions[0].insert
+
+	switch m.inner {
+	case eiURL:
+		insertTextInput(&m.url, insert)
+	case eiContent:
+		switch m.tab {
+		case etBody:
+			m.bodyInput.InsertString(insert)
+		case etParams:
+			if m.paramsField == 1 {
+				m.pathInput.InsertString(insert)
+			} else {
+				m.queryInput.InsertString(insert)
+			}
+		case etHeaders:
+			m.headersInput.InsertString(insert)
+		case etTests:
+			m.testsInput.InsertString(insert)
+		case etAuth:
+			switch m.authKind {
+			case akBearer:
+				insertTextInput(&m.tokenInput, insert)
+			case akBasic:
+				if m.authField == 0 {
+					insertTextInput(&m.userInput, insert)
+				} else if m.authField == 1 {
+					insertTextInput(&m.passInput, insert)
+				}
+			}
+		case etOpts:
+			switch m.optsField {
+			case 3:
+				insertTextInput(&m.proxyInput, insert)
+			case 5:
+				insertTextInput(&m.caBundleInput, insert)
+			case 6:
+				insertTextInput(&m.clientCertInput, insert)
+			case 7:
+				insertTextInput(&m.clientKeyInput, insert)
+			default:
+				return m, false
+			}
+		default:
+			return m, false
+		}
+	default:
+		return m, false
+	}
+	return m, true
+}
+
+func (m EditorModel) completionSuggestions() []editorCompletion {
+	switch m.inner {
+	case eiURL:
+		return m.envCompletions(textinputPrefix(m.url))
+	case eiContent:
+		switch m.tab {
+		case etBody:
+			return m.envCompletions(textareaPrefix(m.bodyInput))
+		case etParams:
+			if m.paramsField == 1 {
+				prefix := textareaPrefix(m.pathInput)
+				if out := m.envCompletions(prefix); len(out) > 0 {
+					return out
+				}
+				return pathParamCompletions(prefix, m.url.Value(), m.pathInput.Value())
+			}
+			return m.envCompletions(textareaPrefix(m.queryInput))
+		case etHeaders:
+			return m.headerCompletions(textareaPrefix(m.headersInput))
+		case etTests:
+			return m.envCompletions(textareaPrefix(m.testsInput))
+		case etAuth:
+			switch m.authKind {
+			case akBearer:
+				return m.envCompletions(textinputPrefix(m.tokenInput))
+			case akBasic:
+				if m.authField == 0 {
+					return m.envCompletions(textinputPrefix(m.userInput))
+				}
+				if m.authField == 1 {
+					return m.envCompletions(textinputPrefix(m.passInput))
+				}
+			}
+		case etOpts:
+			switch m.optsField {
+			case 3:
+				return m.envCompletions(textinputPrefix(m.proxyInput))
+			case 5:
+				return m.envCompletions(textinputPrefix(m.caBundleInput))
+			case 6:
+				return m.envCompletions(textinputPrefix(m.clientCertInput))
+			case 7:
+				return m.envCompletions(textinputPrefix(m.clientKeyInput))
+			}
+		}
+	}
+	return nil
+}
+
+func (m EditorModel) envCompletions(prefix string) []editorCompletion {
+	if len(m.envKeys) == 0 {
+		return nil
+	}
+	idx := strings.LastIndex(prefix, "{{")
+	if idx < 0 {
+		return nil
+	}
+	fragment := prefix[idx:]
+	if strings.Contains(fragment, "}}") || strings.ContainsAny(fragment, " \t\r\n") {
+		return nil
+	}
+
+	var out []editorCompletion
+	for _, key := range m.envKeys {
+		candidate := "{{" + key + "}}"
+		if hasFoldPrefix(candidate, fragment) {
+			out = append(out, editorCompletion{insert: suffixAfterPrefix(candidate, fragment)})
+		}
+	}
+	return out
+}
+
+func (m EditorModel) headerCompletions(prefix string) []editorCompletion {
+	if out := m.envCompletions(prefix); len(out) > 0 {
+		return out
+	}
+	line := strings.TrimLeft(prefix, " \t")
+	if strings.HasPrefix(line, "#") {
+		line = strings.TrimLeft(strings.TrimPrefix(line, "#"), " \t")
+	}
+	colon := strings.Index(line, ":")
+	if colon < 0 {
+		namePrefix := strings.TrimSpace(line)
+		if strings.ContainsAny(namePrefix, " =") {
+			return nil
+		}
+		return listCompletions(headerCompletions, namePrefix, ": ")
+	}
+
+	name := strings.ToLower(strings.TrimSpace(line[:colon]))
+	if name != "content-type" && name != "accept" {
+		return nil
+	}
+	valuePrefix := strings.TrimLeft(line[colon+1:], " \t")
+	if strings.ContainsAny(valuePrefix, " \t;") {
+		return nil
+	}
+	return listCompletions(contentTypeCompletions, valuePrefix, "")
+}
+
+func pathParamCompletions(prefix, rawURL, current string) []editorCompletion {
+	token := paramToken(prefix)
+	if strings.ContainsAny(token, "=: \t") {
+		return nil
+	}
+	present := make(map[string]bool)
+	for _, p := range parseParams(current) {
+		present[p.Key] = true
+	}
+
+	var out []editorCompletion
+	for _, name := range urlPathParams(rawURL) {
+		if present[name] {
+			continue
+		}
+		candidate := name + "="
+		if hasFoldPrefix(candidate, token) {
+			out = append(out, editorCompletion{insert: suffixAfterPrefix(candidate, token)})
+		}
+	}
+	return out
+}
+
+func listCompletions(values []string, prefix, suffix string) []editorCompletion {
+	var out []editorCompletion
+	for _, value := range values {
+		if hasFoldPrefix(value, prefix) {
+			out = append(out, editorCompletion{insert: suffixAfterPrefix(value, prefix) + suffix})
+		}
+	}
+	return out
+}
+
+func textinputPrefix(t textinput.Model) string {
+	runes := []rune(t.Value())
+	pos := min(max(t.Position(), 0), len(runes))
+	return string(runes[:pos])
+}
+
+func textareaPrefix(t textarea.Model) string {
+	lines := strings.Split(t.Value(), "\n")
+	row := t.Line()
+	if row < 0 || row >= len(lines) {
+		return ""
+	}
+	runes := []rune(lines[row])
+	offset := min(max(t.LineInfo().CharOffset, 0), len(runes))
+	return string(runes[:offset])
+}
+
+func insertTextInput(t *textinput.Model, insert string) {
+	runes := []rune(t.Value())
+	pos := min(max(t.Position(), 0), len(runes))
+	next := string(runes[:pos]) + insert + string(runes[pos:])
+	t.SetValue(next)
+	t.SetCursor(pos + len([]rune(insert)))
+}
+
+func paramToken(prefix string) string {
+	token := strings.TrimLeft(prefix, " \t")
+	if strings.HasPrefix(token, "#") {
+		token = strings.TrimLeft(strings.TrimPrefix(token, "#"), " \t")
+	}
+	return strings.TrimSpace(token)
+}
+
+func urlPathParams(raw string) []string {
+	path := raw
+	if u, err := url.Parse(raw); err == nil && u.Path != "" {
+		path = u.Path
+	}
+	seen := make(map[string]bool)
+	var out []string
+	runes := []rune(path)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != ':' {
+			continue
+		}
+		start := i + 1
+		end := start
+		for end < len(runes) && isPathParamChar(runes[end]) {
+			end++
+		}
+		if end == start {
+			continue
+		}
+		name := string(runes[start:end])
+		if !seen[name] {
+			out = append(out, name)
+			seen[name] = true
+		}
+		i = end - 1
+	}
+	return out
+}
+
+func isPathParamChar(r rune) bool {
+	return r == '_' || r == '-' ||
+		(r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9')
+}
+
+func hasFoldPrefix(value, prefix string) bool {
+	return strings.HasPrefix(strings.ToLower(value), strings.ToLower(prefix))
+}
+
+func suffixAfterPrefix(value, prefix string) string {
+	valueRunes := []rune(value)
+	prefixRunes := []rune(prefix)
+	if len(prefixRunes) > len(valueRunes) {
+		return ""
+	}
+	return string(valueRunes[len(prefixRunes):])
+}
+
 func (m *EditorModel) cycleMethod(forward bool) {
 	current := strings.ToUpper(strings.TrimSpace(m.method.Value()))
 	idx := 0
@@ -690,7 +1013,7 @@ func (m EditorModel) View() string {
 			modeLabel = hint.Render("raw")
 		}
 		content = lipgloss.JoinVertical(lipgloss.Left,
-			modeLabel+hint.Render("  alt+m toggle"),
+			modeLabel+hint.Render("  alt+m toggle  alt+/ vars"),
 			m.bodyInput.View(),
 		)
 	case etParams:
@@ -703,9 +1026,9 @@ func (m EditorModel) View() string {
 			pathLabel = tabActive.Render("path params")
 		}
 		content = lipgloss.JoinVertical(lipgloss.Left,
-			queryLabel+hint.Render("  key=value, # disabled"),
+			queryLabel+hint.Render("  key=value, # disabled  alt+/ vars"),
 			m.queryInput.View(),
-			pathLabel+hint.Render("  :id placeholders in URL"),
+			pathLabel+hint.Render("  :id placeholders in URL  alt+/ fill"),
 			m.pathInput.View(),
 		)
 	case etHeaders:

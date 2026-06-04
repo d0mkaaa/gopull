@@ -52,14 +52,14 @@ func TestResponseSetResultClearsVisualMode(t *testing.T) {
 	}
 }
 
-func TestResponseSetResultResetsToBodyTab(t *testing.T) {
+func TestResponseSetResultResetsToPreviewTab(t *testing.T) {
 	m := makeResponse()
 	m.tab = rtHeaders
 
 	m = m.SetResult(makeResult(200, `{}`))
 
-	if m.tab != rtBody {
-		t.Errorf("tab: got %v, want rtBody", m.tab)
+	if m.tab != rtPreview {
+		t.Errorf("tab: got %v, want rtPreview", m.tab)
 	}
 }
 
@@ -211,5 +211,35 @@ func TestBuildResultNon200Code(t *testing.T) {
 	}
 	if !strings.Contains(r.plainBody, "not found") {
 		t.Errorf("plainBody should contain error: %q", r.plainBody)
+	}
+}
+
+func TestResponsePreviewSummarizesJSON(t *testing.T) {
+	m := makeResponse()
+	m = m.SetResult(makeResult(200, `{"data":[{"id":1}],"meta":{"page":1}}`))
+
+	out := m.previewPlain()
+	for _, want := range []string{"response preview", "json", "object, 2 keys", "data", "meta"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("preview missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestResponsePreviewExtractsHTMLText(t *testing.T) {
+	r := buildResult(
+		[]byte(`<html><head><title>Hello</title></head><body><h1>Welcome</h1><p>Readable text.</p></body></html>`),
+		http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		"200 OK",
+		200,
+		12*time.Millisecond,
+	)
+	m := makeResponse().SetResult(r)
+
+	out := m.previewPlain()
+	for _, want := range []string{"html", "Hello", "Welcome", "Readable text."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("preview missing %q:\n%s", want, out)
+		}
 	}
 }

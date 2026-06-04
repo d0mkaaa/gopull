@@ -12,11 +12,18 @@ import (
 	"github.com/d0mkaaa/gopull/internal/tui"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "run" {
-		os.Exit(cli.Run(os.Args[2:], version))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "run":
+			os.Exit(cli.Run(os.Args[2:], version))
+		case "init":
+			os.Exit(cli.Init(os.Args[2:]))
+		case "lint":
+			os.Exit(cli.Lint(os.Args[2:]))
+		}
 	}
 
 	ver := flag.Bool("version", false, "print version and exit")
@@ -27,7 +34,13 @@ func main() {
 		os.Exit(0)
 	}
 
-	st, err := store.New()
+	var st *store.Store
+	var err error
+	if flag.NArg() > 0 {
+		st, err = store.NewWorkspace(flag.Arg(0))
+	} else {
+		st, err = store.New()
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "store:", err)
 		os.Exit(1)

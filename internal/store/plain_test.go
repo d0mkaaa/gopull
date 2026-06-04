@@ -108,3 +108,58 @@ func TestLoadCollectionPathReadsPlainDirectory(t *testing.T) {
 		t.Fatalf("collection: %#v", c)
 	}
 }
+
+func TestPlainCollectionPreservesMetaOrder(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, PlainCollectionFile), []byte("name: Ordered\norder: second, first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "first.gopull"), []byte("name: First\nmethod: GET\nurl: https://example.com/1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "second.gopull"), []byte("name: Second\nmethod: GET\nurl: https://example.com/2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadPlainCollection(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Order; len(got) != 2 || got[0] != "second" || got[1] != "first" {
+		t.Fatalf("order = %#v", got)
+	}
+}
+
+func TestWorkspaceStoreSavesRequestToPlainFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := InitPlainWorkspace(dir, "Demo", false, false); err != nil {
+		t.Fatal(err)
+	}
+	st := &Store{dir: t.TempDir(), workspaceDir: dir}
+	req := &Request{ID: "nested/list-users", Name: "List users", Method: "GET", URL: "https://example.com/users"}
+	if err := st.SaveRequest("demo", req); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "nested", "list-users.gopull")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("saved request missing: %v", err)
+	}
+	c, err := st.LoadCollections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c[0].Requests["nested/list-users"] == nil {
+		t.Fatalf("request not loaded from workspace: %#v", c[0].Requests)
+	}
+}
+
+func TestInitPlainWorkspaceWritesScaffold(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "api")
+	if err := InitPlainWorkspace(dir, "API", true, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{PlainCollectionFile, "example.gopull", ".gitignore", ".env.example"} {
+		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
+			t.Fatalf("%s missing: %v", rel, err)
+		}
+	}
+}

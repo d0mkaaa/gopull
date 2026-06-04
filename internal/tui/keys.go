@@ -17,6 +17,7 @@ type keyMap struct {
 	Plugins        key.Binding
 	BodyMode       key.Binding
 	PrettyPrint    key.Binding
+	Complete       key.Binding
 	Search         key.Binding
 	Import         key.Binding
 	Export         key.Binding
@@ -88,6 +89,10 @@ var keys = keyMap{
 		key.WithKeys("alt+j"),
 		key.WithHelp("alt+j", "format JSON"),
 	),
+	Complete: key.NewBinding(
+		key.WithKeys("alt+/"),
+		key.WithHelp("alt+/", "complete"),
+	),
 	Search: key.NewBinding(
 		key.WithKeys("/"),
 		key.WithHelp("/", "search"),
@@ -138,6 +143,7 @@ func applyKeyOverrides(kb map[string]string) {
 	set(&keys.Plugins, "plugins")
 	set(&keys.BodyMode, "body_mode")
 	set(&keys.PrettyPrint, "format")
+	set(&keys.Complete, "complete")
 	set(&keys.Search, "search")
 	set(&keys.Import, "import")
 	set(&keys.Export, "export")
