@@ -7,6 +7,8 @@
 
 A terminal HTTP client. Send requests, manage collections, inspect responses - keyboard-driven, single binary, no Electron.
 
+![demo](demo.gif)
+
 ---
 
 ## Install

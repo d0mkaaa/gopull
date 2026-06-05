@@ -20,20 +20,22 @@ func viewWelcome(step, w, h int) string {
 		content = welcomeStep2()
 	}
 
-	accent := lipgloss.NewStyle().Foreground(colorAccent).Faint(true)
-	progress := accent.Render(fmt.Sprintf("step %d of %d", step+1, welcomeSteps))
+	progress := themed(lipgloss.NewStyle().Foreground(colorAccent).Faint(true)).
+		Render(fmt.Sprintf("step %d of %d", step+1, welcomeSteps))
 
-	var hint string
+	var hintStr string
 	if step < welcomeSteps-1 {
-		hint = lipgloss.NewStyle().Foreground(colorAccent).Faint(true).Render("press any key to continue  ->")
+		hintStr = themed(lipgloss.NewStyle().Foreground(colorAccent).Faint(true)).
+			Render("press any key to continue  ->")
 	} else {
-		hint = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render("press any key to start")
+		hintStr = themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true)).
+			Render("press any key to start")
 	}
 
-	body := content + "\n\n" + hint
+	body := content + "\n\n" + hintStr
 
 	box := paneActive.
-		Width(w-20).
+		Width(w - 20).
 		Padding(2, 4).
 		Render(body)
 
@@ -42,15 +44,52 @@ func viewWelcome(step, w, h int) string {
 		box,
 	)
 
-	return lipgloss.Place(w, h,
-		lipgloss.Center, lipgloss.Center,
-		boxWithProgress,
-	)
+	if colorBg == "" {
+		return lipgloss.Place(w, h,
+			lipgloss.Center, lipgloss.Center,
+			boxWithProgress,
+		)
+	}
+
+	bgStyle := lipgloss.NewStyle().Background(colorBg)
+	bgLine := bgStyle.Render(strings.Repeat(" ", w))
+
+	overlayLines := strings.Split(boxWithProgress, "\n")
+	oh := len(overlayLines)
+	ow := lipgloss.Width(boxWithProgress)
+
+	topPad := (h - oh) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+	leftPad := (w - ow) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+
+	rows := make([]string, h)
+	for i := range rows {
+		oi := i - topPad
+		if oi < 0 || oi >= oh {
+			rows[i] = bgLine
+			continue
+		}
+		line := overlayLines[oi]
+		lw := lipgloss.Width(line)
+		rpad := w - leftPad - lw
+		if rpad < 0 {
+			rpad = 0
+		}
+		rows[i] = bgStyle.Render(strings.Repeat(" ", leftPad)) +
+			line +
+			bgStyle.Render(strings.Repeat(" ", rpad))
+	}
+	return strings.Join(rows, "\n")
 }
 
 func welcomeStep0() string {
-	accent := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	muted := lipgloss.NewStyle().Foreground(colorMuted)
+	accent := themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true))
+	muted := themed(lipgloss.NewStyle().Foreground(colorMuted))
 
 	lines := []string{
 		accent.Render("gopull"),
@@ -68,9 +107,9 @@ func welcomeStep0() string {
 }
 
 func welcomeStep1() string {
-	accent := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	muted := lipgloss.NewStyle().Foreground(colorMuted)
-	key := lipgloss.NewStyle().Foreground(colorText).Bold(true)
+	accent := themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true))
+	muted := themed(lipgloss.NewStyle().Foreground(colorMuted))
+	key := themed(lipgloss.NewStyle().Foreground(colorText).Bold(true))
 
 	lines := []string{
 		accent.Render("sending requests"),
@@ -88,13 +127,12 @@ func welcomeStep1() string {
 }
 
 func welcomeStep2() string {
-	accent := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	muted := lipgloss.NewStyle().Foreground(colorMuted)
-	key := lipgloss.NewStyle().Foreground(colorText).Bold(true)
-	desc := lipgloss.NewStyle().Foreground(colorMuted)
+	accent := themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true))
+	muted := themed(lipgloss.NewStyle().Foreground(colorMuted))
+	key := themed(lipgloss.NewStyle().Foreground(colorText).Bold(true))
 
 	row := func(k, d string) string {
-		return "  " + key.Render(pad(k, 12)) + desc.Render(d)
+		return "  " + key.Render(pad(k, 12)) + muted.Render(d)
 	}
 
 	lines := []string{

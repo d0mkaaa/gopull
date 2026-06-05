@@ -150,7 +150,7 @@ func (m PaletteModel) View() string {
 		detail := clipText(item.detail, max(12, rowWidth-labelWidth-6))
 		if i == m.idx {
 			sel = tabActive.Render(">") + " "
-			label = lipgloss.NewStyle().Foreground(colorAccent).Render(label)
+			label = themed(lipgloss.NewStyle().Foreground(colorAccent)).Render(label)
 		} else {
 			sel += " "
 		}

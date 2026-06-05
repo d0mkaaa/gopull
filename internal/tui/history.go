@@ -130,7 +130,7 @@ func (m HistoryModel) View() string {
 		method := hint.Render(fmt.Sprintf("%-7s", e.Request.Method))
 		if pos == m.idx {
 			prefix = tabActive.Render(">") + " "
-			method = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(fmt.Sprintf("%-7s", e.Request.Method))
+			method = themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true)).Render(fmt.Sprintf("%-7s", e.Request.Method))
 		}
 		ts := e.Timestamp.Format("01-02 15:04:05")
 		status := statusStyle(e.Response.StatusCode).Render(strconv.Itoa(e.Response.StatusCode))

@@ -30,7 +30,16 @@ func CheckPath(path string) ([]Finding, error) {
 	return Check(c, root), nil
 }
 
+type Options struct {
+	Root      string
+	KnownVars map[string]bool // when non-nil, warn on {{VAR}} with no matching key
+}
+
 func Check(c *store.Collection, root string) []Finding {
+	return CheckWithOptions(c, Options{Root: root})
+}
+
+func CheckWithOptions(c *store.Collection, opts Options) []Finding {
 	var out []Finding
 	if c.Name == "" {
 		out = append(out, Finding{Severity: "warning", Message: "collection has no name"})
@@ -45,7 +54,8 @@ func Check(c *store.Collection, root string) []Finding {
 		if name == "" {
 			name = id
 		}
-		out = append(out, checkRequest(name, r, root)...)
+		out = append(out, checkRequest(name, r, opts.Root)...)
+		out = append(out, checkVarRefs(name, r, opts.KnownVars)...)
 	}
 	return out
 }
@@ -131,7 +141,174 @@ func checkRequest(name string, r *store.Request, root string) []Finding {
 	}
 	out = append(out, checkPathParams(name, r)...)
 	out = append(out, checkTests(name, r.Tests)...)
+	out = append(out, checkSecrets(name, r)...)
+	out = append(out, checkContentTypeMismatch(name, r)...)
 	return out
+}
+
+var varRefRe = regexp.MustCompile(`\{\{([^}]*)\}\}`)
+
+func extractVarRefs(s string) []string {
+	var out []string
+	for _, m := range varRefRe.FindAllStringSubmatch(s, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+func checkVarRefs(name string, r *store.Request, known map[string]bool) []Finding {
+	var out []Finding
+	add := func(field, msg string) {
+		out = append(out, Finding{Severity: "warning", Request: name, Field: field, Message: msg})
+	}
+
+	check := func(field, s string) {
+		for _, key := range extractVarRefs(s) {
+			trimmed := strings.TrimSpace(key)
+			if trimmed == "" {
+				add(field, "empty variable reference {{}}  — did you forget the name?")
+				continue
+			}
+			if trimmed != key {
+				add(field, fmt.Sprintf("variable reference has surrounding spaces: {{%s}}  — use {{%s}}", key, trimmed))
+				continue
+			}
+			if known != nil && !known[trimmed] {
+				add(field, fmt.Sprintf("{{%s}} is not defined in the active environment", trimmed))
+			}
+		}
+	}
+
+	check("url", r.URL)
+	for _, h := range r.Headers {
+		check("headers", h.Value)
+	}
+	check("body", r.Body.Raw)
+	check("auth", r.Auth.Token)
+	check("auth", r.Auth.User)
+	check("auth", r.Auth.Pass)
+	return out
+}
+
+// secretHeaderNames are header keys whose values should never be hardcoded.
+var secretHeaderNames = map[string]bool{
+	"authorization":   true,
+	"x-api-key":       true,
+	"api-key":         true,
+	"x-auth-token":    true,
+	"x-api-token":     true,
+	"x-access-token":  true,
+	"x-secret-key":    true,
+	"proxy-authorization": true,
+}
+
+// secretParamNames are URL query/path param names whose values look like secrets.
+var secretParamNames = map[string]bool{
+	"api_key":   true,
+	"apikey":    true,
+	"api-key":   true,
+	"token":     true,
+	"secret":    true,
+	"password":  true,
+	"passwd":    true,
+	"auth":      true,
+	"access_token": true,
+}
+
+func looksLikeSecret(v string) bool {
+	v = strings.TrimSpace(v)
+	return len(v) > 8 && !strings.Contains(v, "{{")
+}
+
+func checkSecrets(name string, r *store.Request) []Finding {
+	var out []Finding
+	add := func(field, msg string) {
+		out = append(out, Finding{Severity: "warning", Request: name, Field: field, Message: msg})
+	}
+
+	for _, h := range r.Headers {
+		if !h.Enabled {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(h.Key))
+		val := strings.TrimSpace(h.Value)
+		if !secretHeaderNames[key] {
+			continue
+		}
+		check := val
+		if key == "authorization" {
+			// strip "Bearer " / "Basic " prefix before checking
+			if after, ok := strings.CutPrefix(val, "Bearer "); ok {
+				check = after
+			} else if after, ok := strings.CutPrefix(val, "Basic "); ok {
+				check = after
+			}
+		}
+		if looksLikeSecret(check) {
+			add("headers", fmt.Sprintf("header %q appears to contain a hardcoded secret; use {{VAR}} instead", h.Key))
+		}
+	}
+
+	// Check URL query string for secret params.
+	rawURL := r.URL
+	if idx := strings.Index(rawURL, "?"); idx >= 0 {
+		for _, pair := range strings.Split(rawURL[idx+1:], "&") {
+			k, v, ok := strings.Cut(pair, "=")
+			if !ok {
+				continue
+			}
+			if secretParamNames[strings.ToLower(strings.TrimSpace(k))] && looksLikeSecret(v) {
+				add("url", fmt.Sprintf("URL query param %q appears to contain a hardcoded secret; use {{VAR}} instead", strings.TrimSpace(k)))
+			}
+		}
+	}
+
+	// Check bearer/basic auth fields.
+	if r.Auth.Type == "bearer" && looksLikeSecret(r.Auth.Token) {
+		add("auth", "bearer token appears to be hardcoded; use {{VAR}} instead")
+	}
+	if r.Auth.Type == "basic" && looksLikeSecret(r.Auth.Pass) {
+		add("auth", "basic auth password appears to be hardcoded; use {{VAR}} instead")
+	}
+
+	return out
+}
+
+// modeImpliedContentType returns the content-type that a body mode implies, or
+// empty string for modes that don't impose one (raw, file, graphql uses json but
+// it's intentional so we don't flag it).
+var modeImpliedContentType = map[string]string{
+	"form":      "application/x-www-form-urlencoded",
+	"multipart": "multipart/form-data",
+}
+
+func checkContentTypeMismatch(name string, r *store.Request) []Finding {
+	mode := r.Body.Mode
+	if mode == "" {
+		mode = "raw"
+	}
+	implied, ok := modeImpliedContentType[mode]
+	if !ok {
+		return nil
+	}
+	for _, h := range r.Headers {
+		if !h.Enabled {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(h.Key), "content-type") {
+			continue
+		}
+		explicit := strings.ToLower(strings.TrimSpace(h.Value))
+		if explicit != "" && !strings.HasPrefix(explicit, strings.ToLower(implied)) && !strings.Contains(explicit, "{{") {
+			return []Finding{{
+				Severity: "warning",
+				Request:  name,
+				Field:    "headers",
+				Message:  fmt.Sprintf("body mode %q implies Content-Type %q but header is set to %q", mode, implied, h.Value),
+			}}
+		}
+	}
+	return nil
 }
 
 func checkFilePath(root, path string, add func(string)) {

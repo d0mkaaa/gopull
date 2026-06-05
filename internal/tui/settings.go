@@ -45,8 +45,12 @@ var editorFieldPlaceholders = [numEditorFields]string{
 }
 
 type themeEditorModel struct {
-	inputs [numEditorFields]textinput.Model
-	focus  int
+	inputs       [numEditorFields]textinput.Model
+	focus        int
+	searchMatchBg lipgloss.Color
+	searchMatchFg lipgloss.Color
+	badgeFg       lipgloss.Color
+	methodColors  map[string]lipgloss.Color
 }
 
 func newThemeEditorModel(base Theme) themeEditorModel {
@@ -71,6 +75,10 @@ func newThemeEditorModel(base Theme) themeEditorModel {
 	e.inputs[9].SetValue(string(base.Error))
 	e.inputs[10].SetValue(base.ChromaStyle)
 	e.inputs[0].Focus()
+	e.searchMatchBg = base.SearchMatchBg
+	e.searchMatchFg = base.SearchMatchFg
+	e.badgeFg = base.BadgeFg
+	e.methodColors = base.MethodColors
 	return e
 }
 
@@ -102,9 +110,9 @@ func (e themeEditorModel) Update(msg tea.Msg) (themeEditorModel, tea.Cmd) {
 }
 
 func (e themeEditorModel) View(width int) string {
-	accent := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	sub := lipgloss.NewStyle().Foreground(colorSubtle)
-	muted := lipgloss.NewStyle().Foreground(colorMuted)
+	accent := themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true))
+	sub := themed(lipgloss.NewStyle().Foreground(colorSubtle))
+	muted := themed(lipgloss.NewStyle().Foreground(colorMuted))
 
 	var sb strings.Builder
 	sb.WriteString(sidebarTitle.Render("new theme"))
@@ -147,21 +155,29 @@ func (e themeEditorModel) toThemeJSON() themeJSON {
 	if chroma == "" {
 		chroma = "dracula"
 	}
-	return themeJSON{
-		Name:    get(0),
-		Chroma:  chroma,
-		Bg:      get(2),
-		Accent:  get(1),
-		Border:  get(3),
-		Text:    get(4),
-		Subtle:  get(5),
-		Muted:   get(6),
-		Success: get(7),
-		Warn:    get(8),
-		Error:   get(9),
-		// Leave search_bg/search_fg/badge_fg and methods as empty -
-		// ThemeFromJSON will fill defaults.
+	tj := themeJSON{
+		Name:     get(0),
+		Chroma:   chroma,
+		Bg:       get(2),
+		Accent:   get(1),
+		Border:   get(3),
+		Text:     get(4),
+		Subtle:   get(5),
+		Muted:    get(6),
+		Success:  get(7),
+		Warn:     get(8),
+		Error:    get(9),
+		SearchBg: string(e.searchMatchBg),
+		SearchFg: string(e.searchMatchFg),
+		BadgeFg:  string(e.badgeFg),
 	}
+	if len(e.methodColors) > 0 {
+		tj.Methods = make(map[string]string, len(e.methodColors))
+		for k, v := range e.methodColors {
+			tj.Methods[k] = string(v)
+		}
+	}
+	return tj
 }
 
 type SettingsModel struct {
@@ -224,7 +240,7 @@ func (m SettingsModel) ExitThemeEditor() SettingsModel {
 
 func (m SettingsModel) overlayWidth() int {
 	if m.focus == sfThemeEditor {
-		return 64
+		return 72
 	}
 	return 64
 }
@@ -378,9 +394,9 @@ func (m SettingsModel) View() string {
 		return m.themeEditor.View(m.overlayWidth())
 	}
 
-	accent := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	muted := lipgloss.NewStyle().Foreground(colorMuted)
-	sub := lipgloss.NewStyle().Foreground(colorSubtle)
+	accent := themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true))
+	muted := themed(lipgloss.NewStyle().Foreground(colorMuted))
+	sub := themed(lipgloss.NewStyle().Foreground(colorSubtle))
 
 	sectionLabel := func(label string, active bool) string {
 		if active {

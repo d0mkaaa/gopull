@@ -144,7 +144,7 @@ func (m RunnerModel) View() string {
 		idx := m.currentRunningIdx()
 		if idx >= 0 && idx < len(m.results) {
 			footer = hint.Render("running  ") +
-				lipgloss.NewStyle().Foreground(colorAccent).Render(m.results[idx].name) +
+				themed(lipgloss.NewStyle().Foreground(colorAccent)).Render(m.results[idx].name) +
 				hint.Render("...")
 		} else {
 			footer = hint.Render("running...")

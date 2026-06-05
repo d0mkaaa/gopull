@@ -37,18 +37,43 @@ func Lint(args []string) int {
 	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	format := fs.String("format", "text", "text or json")
-	if err := fs.Parse(normalizeWorkspaceArgs(args, map[string]bool{"-format": true, "--format": true})); err != nil {
+	envFile := fs.String("env-file", "", "dotenv or JSON file to check {{VAR}} references against")
+	takesValue := map[string]bool{
+		"-format": true, "--format": true,
+		"-env-file": true, "--env-file": true,
+	}
+	if err := fs.Parse(normalizeWorkspaceArgs(args, takesValue)); err != nil {
 		return 2
 	}
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: gopull lint <collection.json|collection-dir> [--format text|json]")
+		fmt.Fprintln(os.Stderr, "usage: gopull lint <collection.json|collection-dir> [--format text|json] [--env-file .env]")
 		return 2
 	}
-	findings, err := lint.CheckPath(fs.Arg(0))
+
+	c, err := store.LoadCollectionPath(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "lint:", err)
 		return 2
 	}
+	root := ""
+	if info, statErr := os.Stat(fs.Arg(0)); statErr == nil && info.IsDir() {
+		root = fs.Arg(0)
+	}
+
+	opts := lint.Options{Root: root}
+	if *envFile != "" {
+		vars := store.ParseDotenv(*envFile)
+		if vars == nil {
+			fmt.Fprintf(os.Stderr, "lint: could not read env file %s\n", *envFile)
+			return 2
+		}
+		opts.KnownVars = make(map[string]bool, len(vars))
+		for k := range vars {
+			opts.KnownVars[k] = true
+		}
+	}
+
+	findings := lint.CheckWithOptions(c, opts)
 	switch *format {
 	case "json":
 		fmt.Print(lint.FormatJSON(findings))

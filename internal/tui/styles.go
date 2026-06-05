@@ -150,6 +150,13 @@ func fillLine(s string, width int) string {
 	return s + themedSpace(width-w)
 }
 
+func themed(s lipgloss.Style) lipgloss.Style {
+	if colorBg != "" {
+		return s.Background(colorBg)
+	}
+	return s
+}
+
 func mutedRule(width int) string {
 	if width <= 0 {
 		return ""

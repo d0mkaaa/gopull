@@ -152,6 +152,117 @@ func TestWorkspaceStoreSavesRequestToPlainFile(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRenameKeepsSlugStable(t *testing.T) {
+	dir := t.TempDir()
+	if err := InitPlainWorkspace(dir, "Demo", false, false); err != nil {
+		t.Fatal(err)
+	}
+	st := &Store{dir: t.TempDir(), workspaceDir: dir}
+
+	// Save a request — slug comes from the name.
+	req := &Request{Name: "List users", Method: "GET", URL: "https://example.com/users"}
+	if err := st.SaveRequest("demo", req); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load to discover the assigned ID/slug.
+	cols, err := st.LoadCollections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cols[0]
+	var reqID string
+	for id := range c.Requests {
+		if c.Requests[id].Name == "List users" {
+			reqID = id
+			break
+		}
+	}
+	if reqID == "" {
+		t.Fatal("saved request not found in collection")
+	}
+
+	// Rename via store.
+	if err := st.RenameRequest(c.ID, reqID, "List all users"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	// File at original slug must still exist (slug-stable).
+	slug := reqID
+	if idx := len(filepath.FromSlash(slug)); idx > 0 {
+		slug = filepath.FromSlash(reqID)
+	}
+	if _, err := os.Stat(filepath.Join(dir, slug+".gopull")); err != nil {
+		t.Fatalf("original slug file gone after rename: %v", err)
+	}
+
+	// Reload — request name must be updated, ID must be unchanged.
+	cols2, err := st.LoadCollections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2 := cols2[0].Requests[reqID]
+	if r2 == nil {
+		t.Fatalf("request lost after rename: %#v", cols2[0].Requests)
+	}
+	if r2.Name != "List all users" {
+		t.Fatalf("name not updated after rename: got %q", r2.Name)
+	}
+
+	// No orphan files: only one .gopull file should exist (plus example.gopull from init).
+	var gopullFiles []string
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, _ error) error {
+		if !d.IsDir() && filepath.Ext(path) == ".gopull" {
+			gopullFiles = append(gopullFiles, path)
+		}
+		return nil
+	})
+	if len(gopullFiles) != 2 { // example.gopull + our request
+		t.Fatalf("expected 2 .gopull files, got %d: %v", len(gopullFiles), gopullFiles)
+	}
+}
+
+func TestExportThenWorkspaceSaveRoundTrip(t *testing.T) {
+	// Export a collection to a directory, then open as workspace, save a new
+	// request, and reload — verifying IDs and filenames stay consistent.
+	c := &Collection{
+		Name: "API",
+		Requests: map[string]*Request{
+			"hex123abc": {Name: "Get item", Method: "GET", URL: "https://example.com/item"},
+		},
+		Order: []string{"hex123abc"},
+	}
+	dir := filepath.Join(t.TempDir(), "ws")
+	if err := ExportPlainCollection(c, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// After export the filename is slug-based (from name), not hex.
+	if _, err := os.Stat(filepath.Join(dir, "get-item.gopull")); err != nil {
+		t.Fatalf("expected slug-based filename after export: %v", err)
+	}
+
+	// Open as workspace and save a new request.
+	st := &Store{dir: t.TempDir(), workspaceDir: dir}
+	req := &Request{Name: "Post item", Method: "POST", URL: "https://example.com/item"}
+	if err := st.SaveRequest("api", req); err != nil {
+		t.Fatalf("save new request: %v", err)
+	}
+
+	// Reload — both requests should be present with slug IDs.
+	cols, err := st.LoadCollections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cols[0].Requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d: %#v", len(cols[0].Requests), cols[0].Requests)
+	}
+	// Original request now has a slug ID (from filename), not hex.
+	if cols[0].Requests["get-item"] == nil {
+		t.Fatalf("original request not found by slug ID: %#v", cols[0].Requests)
+	}
+}
+
 func TestInitPlainWorkspaceWritesScaffold(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "api")
 	if err := InitPlainWorkspace(dir, "API", true, false); err != nil {

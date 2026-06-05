@@ -94,9 +94,9 @@ func viewCheatsheet(w, h int) string {
 	}
 
 	keyW := 26
-	accentSt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	mutedSt := lipgloss.NewStyle().Foreground(colorMuted)
-	subtleSt := lipgloss.NewStyle().Foreground(colorSubtle)
+	accentSt := themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true))
+	mutedSt := themed(lipgloss.NewStyle().Foreground(colorMuted))
+	subtleSt := themed(lipgloss.NewStyle().Foreground(colorSubtle))
 
 	col1 := strings.Builder{}
 	col2 := strings.Builder{}
@@ -124,8 +124,8 @@ func viewCheatsheet(w, h int) string {
 	}
 
 	colW := (w - 6) / 2
-	left := lipgloss.NewStyle().Width(colW).Render(col1.String())
-	right := lipgloss.NewStyle().Width(colW).Render(col2.String())
+	left := themed(lipgloss.NewStyle().Width(colW)).Render(col1.String())
+	right := themed(lipgloss.NewStyle().Width(colW)).Render(col2.String())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "   ", right)
 
 	return lipgloss.JoinVertical(lipgloss.Left,

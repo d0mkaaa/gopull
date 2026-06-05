@@ -409,7 +409,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sidebar = m.sidebar.RefreshTheme()
 		m.response = m.response.RefreshTheme()
 		m.spin.Style = lipgloss.NewStyle().Foreground(colorAccent)
-		return m, saveThemeCmd(m.store, m.theme)
+		w, h := m.width, m.height
+		return m, tea.Batch(
+			saveThemeCmd(m.store, m.theme),
+			tea.Sequence(tea.ClearScreen, func() tea.Msg { return tea.WindowSizeMsg{Width: w, Height: h} }),
+		)
 
 	case pluginsLoadedMsg:
 		m.plugins = msg.runner
@@ -463,7 +467,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.status = "theme saved: " + msg.themeID
-		return m, tea.Batch(saveThemeCmd(m.store, m.theme), clearStatusCmd())
+		w, h := m.width, m.height
+		return m, tea.Batch(
+			saveThemeCmd(m.store, m.theme),
+			clearStatusCmd(),
+			tea.Sequence(tea.ClearScreen, func() tea.Msg { return tea.WindowSizeMsg{Width: w, Height: h} }),
+		)
 
 	case tea.MouseMsg:
 		// Left click: switch focus to the pane that was clicked.

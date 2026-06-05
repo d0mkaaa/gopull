@@ -111,6 +111,13 @@ type EditorModel struct {
 	collectionID string
 	requestName  string
 
+	// Completion cycling state. completionActive is cleared on any key except Complete.
+	completionActive bool
+	completionIdx    int
+	completionAll    []editorCompletion
+	completionVal    string // textinput value snapshot before first completion
+	completionCursor int    // textinput cursor snapshot
+
 	width  int
 	height int
 }
@@ -313,6 +320,9 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 	}
 
 	if km, ok := msg.(tea.KeyMsg); ok {
+		if !key.Matches(km, keys.Complete) {
+			m.completionActive = false
+		}
 		switch {
 		case key.Matches(km, keys.Complete):
 			if next, ok := m.applyCompletion(); ok {
@@ -675,11 +685,71 @@ func (m *EditorModel) updateAuthInput(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
+// activeTextInput returns a pointer to whichever textinput.Model currently
+// has focus, or nil if the active field is a textarea.
+func (m *EditorModel) activeTextInput() *textinput.Model {
+	switch m.inner {
+	case eiURL:
+		return &m.url
+	case eiContent:
+		switch m.tab {
+		case etAuth:
+			switch m.authKind {
+			case akBearer:
+				return &m.tokenInput
+			case akBasic:
+				if m.authField == 0 {
+					return &m.userInput
+				}
+				return &m.passInput
+			}
+		case etOpts:
+			switch m.optsField {
+			case 3:
+				return &m.proxyInput
+			case 5:
+				return &m.caBundleInput
+			case 6:
+				return &m.clientCertInput
+			case 7:
+				return &m.clientKeyInput
+			}
+		}
+	}
+	return nil
+}
+
 func (m EditorModel) applyCompletion() (EditorModel, bool) {
+	ti := m.activeTextInput()
+
+	// Cycle: if we're in completion mode on a textinput field, restore the
+	// pre-completion state and advance to the next suggestion.
+	if m.completionActive && ti != nil && len(m.completionAll) > 1 {
+		ti.SetValue(m.completionVal)
+		ti.SetCursor(m.completionCursor)
+		m.completionIdx = (m.completionIdx + 1) % len(m.completionAll)
+		next := m.completionAll[m.completionIdx]
+		if next.insert != "" {
+			insertTextInput(ti, next.insert)
+		}
+		return m, true
+	}
+
 	suggestions := m.completionSuggestions()
 	if len(suggestions) == 0 || suggestions[0].insert == "" {
+		m.completionActive = false
 		return m, false
 	}
+
+	// Snapshot textinput state before inserting so cycling can restore it.
+	if ti != nil {
+		m.completionVal = ti.Value()
+		m.completionCursor = ti.Position()
+		m.completionAll = suggestions
+		m.completionIdx = 0
+		m.completionActive = len(suggestions) > 1
+	}
+
 	insert := suggestions[0].insert
 
 	switch m.inner {

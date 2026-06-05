@@ -238,7 +238,7 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 				m.jsonTree.moveCursor(1)
 				m = m.syncViewportToCursor()
 			} else {
-				m.viewport.LineDown(1)
+				m.viewport.ScrollDown(1)
 				if m.visualMode {
 					m = m.refreshViewportBody()
 				}
@@ -250,7 +250,7 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 				m.jsonTree.moveCursor(-1)
 				m = m.syncViewportToCursor()
 			} else {
-				m.viewport.LineUp(1)
+				m.viewport.ScrollUp(1)
 				if m.visualMode {
 					m = m.refreshViewportBody()
 				}
@@ -286,7 +286,7 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 				m.jsonTree.moveCursor(m.viewport.Height / 2)
 				m = m.syncViewportToCursor()
 			} else {
-				m.viewport.LineDown(m.viewport.Height / 2)
+				m.viewport.ScrollDown(m.viewport.Height / 2)
 				if m.visualMode {
 					m = m.refreshViewportBody()
 				}
@@ -298,7 +298,7 @@ func (m ResponseModel) Update(msg tea.Msg) (ResponseModel, tea.Cmd) {
 				m.jsonTree.moveCursor(-(m.viewport.Height / 2))
 				m = m.syncViewportToCursor()
 			} else {
-				m.viewport.LineUp(m.viewport.Height / 2)
+				m.viewport.ScrollUp(m.viewport.Height / 2)
 				if m.visualMode {
 					m = m.refreshViewportBody()
 				}
@@ -414,7 +414,7 @@ func (m ResponseModel) View() string {
 	case m.result != nil:
 		pct := int(m.viewport.ScrollPercent() * 100)
 		elapsedStr := m.result.elapsed.Round(time.Millisecond).String()
-		pipe := lipgloss.NewStyle().Foreground(colorBorder).Render(" | ")
+		pipe := themed(lipgloss.NewStyle().Foreground(colorBorder)).Render(" | ")
 		ct := clipText(m.result.contentType, max(10, m.width-42))
 		statusLine = statusStyle(m.result.code).Render(m.result.status) +
 			pipe + elapsedColor(m.result.elapsed).Render(elapsedStr) +
@@ -468,9 +468,9 @@ func (m ResponseModel) View() string {
 			lo, hi = hi, lo
 		}
 		nLines := hi - lo + 1
-		extra = "\n" + lipgloss.NewStyle().
+		extra = "\n" + themed(lipgloss.NewStyle().
 			Foreground(colorAccent).
-			Bold(true).
+			Bold(true)).
 			Render(fmt.Sprintf(" VISUAL  %d lines   y copy   esc cancel", nLines))
 	} else if m.treeView && m.jsonTree != nil {
 		extra = "\n" + hint.Render("tree   space toggle   c collapse all   e expand all   {/} sibling   t exit")
@@ -863,7 +863,7 @@ func previewTitle(s string, plain bool) string {
 	if plain {
 		return s
 	}
-	return lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(s)
+	return themed(lipgloss.NewStyle().Foreground(colorAccent).Bold(true)).Render(s)
 }
 
 func previewKV(label, value string, width int, plain bool) string {
@@ -1028,7 +1028,7 @@ func (m ResponseModel) binaryView() string {
 	if m.result == nil {
 		return ""
 	}
-	warn := lipgloss.NewStyle().Foreground(colorSubtle).Bold(true)
+	warn := themed(lipgloss.NewStyle().Foreground(colorSubtle).Bold(true))
 	ct := m.result.contentType
 	if ct == "" {
 		ct = "binary"
@@ -1043,7 +1043,7 @@ func (m ResponseModel) tooLargeView() string {
 		return ""
 	}
 	size := formatSize(m.result.size)
-	warn := lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
+	warn := themed(lipgloss.NewStyle().Foreground(colorWarn).Bold(true))
 	treeHint := ""
 	if m.jsonTree != nil {
 		treeHint = "\n" + hint.Render("t      tree view")

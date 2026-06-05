@@ -12,7 +12,7 @@ import (
 	"github.com/d0mkaaa/gopull/internal/tui"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -23,6 +23,9 @@ func main() {
 			os.Exit(cli.Init(os.Args[2:]))
 		case "lint":
 			os.Exit(cli.Lint(os.Args[2:]))
+		case "version":
+			fmt.Println("gopull " + version)
+			os.Exit(0)
 		}
 	}
 

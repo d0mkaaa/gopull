@@ -57,6 +57,9 @@ func (s *Store) Dir() string { return s.dir }
 func (s *Store) WorkspaceDir() string { return s.workspaceDir }
 
 func configDir() (string, error) {
+	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+		return filepath.Join(x, "gopull"), nil
+	}
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("config dir: %w", err)
